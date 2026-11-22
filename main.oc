@@ -1,0 +1,286 @@
+package main;
+import "term/tui";
+import "io";
+import "time";
+import "os";
+
+struct pulse {}
+struct clearNoticeMsg { revision int; }
+struct App {
+    game Game;
+    active, menu, flagMode bool;
+    choice, width, height, offsetX, offsetY int;
+    notice string;
+    noticeRevision int;
+    overwrite bool;
+    saveDestination string;
+    dialogChoice int;
+    savePath, pendingPath string;
+    popup, filename, popupError string;
+    entryChoice int;
+    files []string;
+    fileChoice, fileOffset int;
+    settings bool;
+    settingsChoice int;
+    themes []Theme;
+    themeFilter string;
+    themeMatches []int;
+    themeChoice, themeOffset int;
+}
+func (a *App) setNotice(text string) {
+    a.notice = displaySafe(text);
+    a.noticeRevision++;
+}
+func (a *App) noticeCommand(previous int) tui.Cmd {
+    if (a.noticeRevision != previous && len(a.notice) >= 9 && a.notice[:9] == "Saved to ")
+        return tui.Tick(900 * time.Millisecond, clearNoticeMsg{a.noticeRevision});
+    return tui.NoCmd;
+}
+func (a *App) Init() tui.Cmd { return tui.Tick(time.Second, pulse{}); }
+func (a *App) store() bool {
+    if (!a.active || a.game.lost || a.game.won) { a.setNotice("No unfinished game to save."); return false; }
+    path := a.pendingPath == "" ? a.currentPath() : a.pendingPath;
+    result := saveGameTo(&a.game, path);
+    if (result == Result<bool>.error) { a.setNotice("Save failed: "+result.(Result<bool>.error)); return false; }
+    a.savePath = path;
+    a.setNotice("Saved to "+path); return true;
+}
+// Return true only when the requested destination is process exit.
+func (a *App) finishSave(destination string) bool {
+    if (destination == "menu") { a.menu = true; a.choice = 3; }
+    return destination == "quit";
+}
+func (a *App) currentPath() string { return a.savePath == "" ? "minesweeper.save" : a.savePath; }
+func (a *App) requestSave(destination string) bool { return a.requestSaveTo(destination, a.currentPath()); }
+func (a *App) requestSaveTo(destination string, path string) bool {
+    a.pendingPath = path;
+    if (!a.active || a.game.lost || a.game.won) {
+        if (destination != "save") return a.finishSave(destination);
+        a.store(); return false;
+    }
+    if (differentBoardAt(&a.game, path)) {
+        a.overwrite = true;
+        a.saveDestination = destination;
+        a.dialogChoice = a.dialogCount()-1;
+        return false;
+    }
+    if (a.store()) return a.finishSave(destination);
+    return false;
+}
+func (a *App) dialogCount() int { return a.saveDestination == "save" ? 3 : 4; }
+func (a *App) dialogSelect() bool {
+    destination := a.saveDestination;
+    if (a.dialogChoice == 1) {
+        a.openFilename("save", destination);
+        return false;
+    }
+    a.overwrite = false;
+    if (a.dialogChoice == 0) {
+        if (a.store()) return a.finishSave(destination);
+    } else if (a.dialogChoice == 2 && destination != "save") {
+        return a.finishSave(destination);
+    }
+    return false;
+}
+func (a *App) dialogWidth() int { return a.width > 55 ? 54 : a.width-1; }
+func (a *App) dialogLeft() int { return (a.width-1-a.dialogWidth())/2; }
+func (a *App) dialogHeight() int {
+    if (a.popup == "picker" || a.popup == "themes") { n := a.height-4; return n < 10 ? 10 : (n > 18 ? 18 : n); }
+    return 12;
+}
+func (a *App) dialogTop() int { return a.height > a.dialogHeight() ? (a.height-a.dialogHeight())/2 : 0; }
+func (a *App) select() bool {
+    if (a.choice < 3) { a.offsetX = 0; a.offsetY = 0; a.savePath = ""; a.pendingPath = ""; a.game = newGame(a.choice); a.active = true; a.menu = false; a.setNotice("First reveal is safe. Good luck!"); }
+    if (a.choice == 3) {
+        if (a.active && !a.game.lost && !a.game.won) { a.menu = false; a.setNotice("Game resumed."); }
+        else {
+            if (!a.resumePath("minesweeper.save")) a.setNotice(a.popupError);
+        }
+    }
+    if (a.choice == 4) { a.settings = true; a.settingsChoice = 0; }
+    if (a.choice == 5) return true;
+    if (a.choice == 6) a.openPicker();
+    return false;
+}
+func (a *App) reset() {
+    level := 0;
+    if (a.game.width == 16) level = 1;
+    if (a.game.width == 30) level = 2;
+    a.game = newGame(level);
+    a.offsetX = 0; a.offsetY = 0; a.flagMode = false;
+    a.setNotice("New board. First reveal is safe. Good luck!");
+}
+func (a *App) click(button string, x int, y int) bool {
+    if (button != "left" && button != "middle" && button != "right") return false;
+    if (a.menu) {
+        if (a.settings) {
+            if (button == "left" && x >= 2 && x < 55) {
+                if (y == 6) a.openThemes();
+                if (y == 8) a.settings = false;
+            }
+            return false;
+        }
+        if (x >= 2 && x < 55 && y >= 6 && y <= 18 && (y-6)%2 == 0) { a.choice = (y-6)/2; return a.select(); }
+        return false;
+    }
+    if (y == 3) {
+        if (x >= 2 && x < 10) return a.requestSave("menu");
+        if (x >= 11 && x < 19) return a.requestSave("save");
+        if (x >= 20 && x < 34) a.flagMode = !a.flagMode;
+        if (x >= 35 && x < 48) return a.requestSave("quit");
+        if (button == "left" && x >= 49 && x < 58) a.reset();
+        if (button == "left" && x >= 59 && x < 62) a.openThemes();
+        return false;
+    }
+    if (y == 4) {
+        if (button == "left" && x >= 24 && x < 33) { a.openFilename("save", "save"); return false; }
+        if (x >= 36 && x < 42 && a.offsetX > 0) a.offsetX--;
+        if (x >= 43 && x < 49 && a.offsetX+a.columns() < a.game.width) a.offsetX++;
+        if (x >= 50 && x < 56 && a.offsetY > 0) a.offsetY--;
+        if (x >= 57 && x < 63 && a.offsetY+a.rows() < a.game.height) a.offsetY++;
+        return false;
+    }
+    xx := (x-3)/3+a.offsetX; yy := y-6+a.offsetY;
+    if (x < 3 || x >= 3+a.columns()*3 || y < 6 || y >= 6+a.rows()) return false;
+    if (xx >= a.game.width || yy >= a.game.height) return false;
+    a.game.cursor = yy*a.game.width+xx;
+    if (button == "right" || a.flagMode) a.game.flag(a.game.cursor);
+    else if (button == "middle") a.game.chord(a.game.cursor);
+    else a.game.reveal(a.game.cursor);
+    return false;
+}
+func (a *App) columns() int { n := (a.width-5)/3; if (n < 1) n = 1; return n < a.game.width ? n : a.game.width; }
+func (a *App) rows() int { n := a.height-12; if (n < 1) n = 1; return n < a.game.height ? n : a.game.height; }
+func (a *App) scroll() {
+    x := a.game.cursor%a.game.width; y := a.game.cursor/a.game.width;
+    if (x < a.offsetX) a.offsetX = x;
+    if (x >= a.offsetX+a.columns()) a.offsetX = x-a.columns()+1;
+    if (y < a.offsetY) a.offsetY = y;
+    if (y >= a.offsetY+a.rows()) a.offsetY = y-a.rows()+1;
+    if (a.offsetX > a.game.width-a.columns()) a.offsetX = a.game.width-a.columns();
+    if (a.offsetY > a.game.height-a.rows()) a.offsetY = a.game.height-a.rows();
+}
+func (a *App) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+    previousNotice := a.noticeRevision;
+    switch (e := message.(type)) {
+        case clearNoticeMsg:
+            if (e.revision == a.noticeRevision) a.setNotice("");
+        case pulse:
+            if (!a.overwrite && a.popup == "" && !a.menu && a.active && a.game.seeded && !a.game.lost && !a.game.won) a.game.seconds++;
+            return a, tui.Tick(time.Second, pulse{});
+        case tui.WindowSizeMsg: a.width = e.Width; a.height = e.Height;
+        case tui.EOFMsg: return a, tui.Quit;
+        case tui.MouseMsg:
+            if (a.popup != "") {
+                if (a.popupMouse(e)) return a, tui.Quit;
+                return a, a.noticeCommand(previousNotice);
+            }
+            if (a.overwrite) {
+                row := e.Y-a.dialogTop()-5;
+                if (e.Action == "press" && e.Button == "left" && e.X > a.dialogLeft() && e.X < a.dialogLeft()+a.dialogWidth()-1 && row >= 0 && row < a.dialogCount()) {
+                    a.dialogChoice = row;
+                    if (a.dialogSelect()) return a, tui.Quit;
+                }
+                return a, a.noticeCommand(previousNotice);
+            }
+            if (e.Action == "press") {
+                if (a.click(e.Button, e.X, e.Y)) return a, tui.Quit;
+            }
+            return a, a.noticeCommand(previousNotice);
+        case tui.KeyMsg:
+            if (e.Key == "ctrl+c") return a, tui.Quit;
+            if (a.popup != "") {
+                if (a.popupKey(e)) return a, tui.Quit;
+                return a, a.noticeCommand(previousNotice);
+            }
+            if (a.overwrite) {
+                if (e.Key == "esc" || e.Text == "c") a.overwrite = false;
+                else if (e.Key == "up" || e.Key == "shift+tab" || e.Text == "k") a.dialogChoice = (a.dialogChoice+a.dialogCount()-1)%a.dialogCount();
+                else if (e.Key == "down" || e.Key == "tab" || e.Text == "j") a.dialogChoice = (a.dialogChoice+1)%a.dialogCount();
+                else if (e.Key == "enter" || e.Key == "space") { if (a.dialogSelect()) return a, tui.Quit; }
+                return a, a.noticeCommand(previousNotice);
+            }
+            if (a.menu) {
+                if (a.settings) { a.settingsKey(e); return a, tui.NoCmd; }
+                if (e.Text == "t") { a.openThemes(); return a, tui.NoCmd; }
+                if (e.Key == "up" || e.Text == "k") a.choice = (a.choice+6)%7;
+                if (e.Key == "down" || e.Text == "j" || e.Key == "tab") a.choice = (a.choice+1)%7;
+                if (e.Text == "q") return a, tui.Quit;
+                if (e.Text == "1" || e.Text == "2" || e.Text == "3") { a.choice = (e.Text[0] -> int)-49; a.select(); }
+                if (e.Key == "enter" || e.Key == "space") { if (a.select()) return a, tui.Quit; }
+                if (e.Key == "esc" && a.active) a.menu = false;
+            } else {
+                x := a.game.cursor%a.game.width; y := a.game.cursor/a.game.width;
+                if ((e.Key == "left" || e.Text == "h" || e.Text == "a") && x > 0) a.game.cursor--;
+                if ((e.Key == "right" || e.Text == "l" || e.Text == "d") && x+1 < a.game.width) a.game.cursor++;
+                if ((e.Key == "up" || e.Text == "k" || e.Text == "w") && y > 0) a.game.cursor -= a.game.width;
+                if ((e.Key == "down" || e.Text == "j" || e.Text == "s") && y+1 < a.game.height) a.game.cursor += a.game.width;
+                if (e.Key == "space" || e.Key == "enter") a.game.reveal(a.game.cursor);
+                if (e.Text == "t") a.openThemes();
+                if (e.Text == "f") a.game.flag(a.game.cursor);
+                if (e.Text == "c") a.game.chord(a.game.cursor);
+                if (e.Text == "S") a.openFilename("save", "save");
+                if (e.Text == "v") a.requestSave("save");
+                if (e.Text == "r") a.reset();
+                if (e.Text == "q") { if (a.requestSave("quit")) return a, tui.Quit; }
+                if (e.Key == "esc" || e.Text == "m") a.requestSave("menu");
+            }
+    }
+    if (a.active) a.scroll();
+    return a, a.noticeCommand(previousNotice);
+}
+func (a *App) View() string {
+    title := themeTitle()+"  M I N E S W E E P E R\x1b[0m\n"+themeMuted()+"  Ocean / terminal edition\x1b[0m\n\n";
+    if (a.menu) {
+        if (a.settings) {
+            text := title+"  Settings\n  Choose an option or press t for themes\n\n";
+            labels := []string{"Themes (t)","Back to main menu"};
+            for (i, label := range labels) text += (i == a.settingsChoice ? themeFocus()+" > " : themeBase()+"   ")+label+"  \x1b[0m\n\n";
+            return a.themedView(text+"  "+a.notice);
+        }
+        text := title+"  Choose an expedition\n  Arrows + Enter, or click a difficulty\n\n";
+        labels := []string{"Beginner       9 x 9    / 10 mines","Intermediate  16 x 16   / 40 mines","Expert        30 x 16   / 99 mines","Resume game   (current game or saved file)","Settings","Quit","Resume from other game..."};
+        for (i, label := range labels) text += (i == a.choice ? themeFocus()+" > " : themeBase()+"   ")+label+"  \x1b[0m\n\n";
+        text += "  "+a.notice+"\n  1 / 2 / 3: quick start    q: quit";
+        return a.themedView(text);
+    }
+    text := title+themePanel()+"  [ Menu ] [ Save ] [ Flag: "+(a.flagMode ? "ON " : "OFF")+" ] [ Save+Quit ] [ Reset ] [t]\x1b[0m\n";
+    stats := "  Mines: "+io.Sprint(a.game.mines-a.game.flags())+"   Time: "+io.Sprint(a.game.seconds)+"s";
+    stats = padded(stats,24);
+    stats += "[Save as]";
+    for (len(stats) < 36) stats += " ";
+    text += themeMuted()+stats[:24]+"\x1b[0m"+themePanel()+stats[24:]+"[ <  ] [ >  ] [ ^  ] [ v  ]\x1b[0m\n\n";
+    for (y := a.offsetY; y < a.offsetY+a.rows(); y++) {
+        text += "   ";
+        for (x := a.offsetX; x < a.offsetX+a.columns(); x++) {
+            symbol, style := tileAppearance(&a.game,y*a.game.width+x);
+            text += style+" "+symbol+" \x1b[0m";
+        }
+        text += "\n";
+    }
+    text += "\n  "+(a.game.lost ? themeDanger()+"Mine hit! Open Menu to try again.\x1b[0m" : (a.game.won ? themeTitle()+"Field cleared! You win.\x1b[0m" : a.notice));
+    text += themeMuted()+"\n  Move: arrows/WASD/hjkl  Reveal: Enter/Space  Flag: f\n  Click: reveal / right: flag / middle: chord\n  c: chord  r: reset  t: themes  v: save  S: save as  m/Esc: menu  q: save + quit";
+    return a.themedView(text);
+}
+func main() int {
+    args := os.Args();
+    for (i := 1; i < len(args); i++) {
+        if (args[i] == "--install") {
+            installed := installConfiguration();
+            if (installed.hasError()) { io.Println(installed.error()).unwrap(); return 1; }
+            io.Printfln("Configuration ready at {}. Installed {} theme(s).",configDirectory(),installed.unwrap()).unwrap();
+            return 0;
+        }
+        if (args[i] == "--help" || args[i] == "-h") {
+            io.Println("Usage: minesweeper [--install]\n--install creates settings and installs missing ./themes/*.toml files.\nDuring play: t opens themes; Tab/Shift+Tab navigates, Enter saves.").unwrap();
+            return 0;
+        }
+        io.Printfln("Unknown option: {}",args[i]).unwrap(); return 1;
+    }
+    app := App{menu:true,width:80,height:24,notice:"Welcome. Choose a difficulty or resume a saved game."};
+    app.loadPreferences();
+    program := tui.NewProgram(&app,tui.Options{AltScreen:true,Mouse:true});
+    result := program.Run();
+    if (result.hasError()) { io.Println(result.error()).unwrap(); return 1; }
+    return 0;
+}

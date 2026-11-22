@@ -1,0 +1,77 @@
+package main;
+
+import "testing";
+import "term/tui";
+
+func TestThemeParserAndInheritance(t *testing.T) {
+    parsed := parseTheme("# A custom palette\nname = 'Quiet Blue'\n[colors] # inline comment\nbackground = \"#1234AB\" # color\n", "quiet-blue");
+    if (parsed.hasError()) t.Fatal(parsed.error());
+    theme := parsed.unwrap();
+    if (theme.id != "quiet-blue" || theme.name != "Quiet Blue" || theme.colors["background"] != "18;52;171") t.Fatal("Theme fields were not parsed");
+    original := defaultTheme();
+    if (theme.colors["number_1"] != original.colors["number_1"] || original.colors["background"] != "8;17;32") t.Fatal("Partial palettes must inherit without changing Ocean Dark");
+    invalid := []string{
+        "[colors]\nbackground = \"#12345G\"", "[colors]\nbackground = \"red\"",
+        "[colors]\nunknown = \"#123456\"", "[other]\nname = \"bad\"",
+        "name = \"one\"\nname = \"two\"", "[colors]\n[colors]",
+        "name = \"unfinished", "name = \"bad\\nname\"", "name = \"fine\" trailing"
+    };
+    for (_, text := range invalid) if (!parseTheme(text,"invalid").hasError()) t.Fatalf("Invalid theme was accepted: {}",text);
+}
+func TestBundledThemes(t *testing.T) {
+    for (_, id := range []string{"ocean-dark","ocean-light","midnight","graphite"}) {
+        source := readText("themes/"+id+".toml",65536);
+        if (source.hasError()) t.Fatal(source.error());
+        parsed := parseTheme(source.unwrap(),id);
+        if (parsed.hasError()) t.Fatal(parsed.error());
+        theme := parsed.unwrap();
+        if (len(theme.colors) != 26) t.Fatal("Bundled theme must contain the complete color schema");
+        if (id == "ocean-dark") {
+            builtin := defaultTheme();
+            for (key, color := range builtin.colors) if (theme.colors[key] != color) t.Fatalf("Bundled and built-in Ocean Dark differ at {}",key);
+        }
+    }
+}
+func TestPreferencesJSON(t *testing.T) {
+    parsed := savedThemeID("{\"theme\":\"midnight\",\"extra\":true}");
+    if (parsed.hasError() || parsed.unwrap() != "midnight") t.Fatal("Settings must read the selected theme");
+    for (_, text := range []string{"{}","[]","null","broken","{\"theme\":42}","{\"theme\":\"\"}"}) {
+        if (!savedThemeID(text).hasError()) t.Fatal("Invalid settings must report an error instead of panicking");
+    }
+}
+func TestThemeFilteringAndNavigation(t *testing.T) {
+    a := App{width:80,height:24,popup:"themes",themes:[]Theme{
+        Theme{id:"ocean-dark",name:"Ocean Dark"},Theme{id:"midnight",name:"Midnight"},Theme{id:"graphite",name:"Graphite"},Theme{id:"ocean-light",name:"Ocean Light"}
+    }};
+    a.filterThemes();
+    if (len(a.themeMatches) != 4) t.Fatal("An empty filter must show all themes");
+    a.themeKey(tui.KeyMsg{Key:"shift+tab"});
+    if (a.themeChoice != 3) t.Fatal("Shift+Tab must wrap to the last matching theme");
+    a.themeKey(tui.KeyMsg{Key:"tab"});
+    if (a.themeChoice != 0) t.Fatal("Tab must wrap to the first theme");
+    for (_, letter := range []string{"O","C","E","A","N"}) a.themeKey(tui.KeyMsg{Key:"rune",Text:letter});
+    if (len(a.themeMatches) != 2 || a.themeMatches[0] != 0 || a.themeMatches[1] != 3) t.Fatal("Theme filtering must match names case-insensitively");
+    a.themeKey(tui.KeyMsg{Key:"tab"});
+    if (a.themeChoice != 1) t.Fatal("Tab must navigate only filtered themes");
+    a.themeKey(tui.KeyMsg{Key:"ctrl+u"});
+    if (len(a.themeMatches) != 4 || a.themeFilter != "") t.Fatal("Clearing the filter must restore all themes");
+    a.themeFilter = "missing"; a.filterThemes();
+    a.themeKey(tui.KeyMsg{Key:"enter"});
+    if (a.popup != "themes" || len(a.themeMatches) != 0) t.Fatal("Enter with no matches must keep the picker open");
+    a.themeFilter = "";
+    for (i := 0; i < 100; i++) a.themeFilter += "界";
+    if (textCells(a.themeContent(3)) > a.dialogWidth()-2) t.Fatal("Long search queries must stay inside the filter box");
+    a.themeKey(tui.KeyMsg{Key:"esc"});
+    if (a.popup != "") t.Fatal("Escape must close the theme picker");
+}
+func TestThemeShortcutsAndSettings(t *testing.T) {
+    a := App{game:newGame(0),active:true,width:80,height:24};
+    cursor := a.game.cursor;
+    a.Update(tui.KeyMsg{Key:"rune",Text:"t"});
+    if (a.popup != "themes" || a.game.cursor != cursor) t.Fatal("t must open themes without altering the board");
+    a.Update(tui.KeyMsg{Key:"esc"});
+    a.menu = true; a.choice = 4; a.select();
+    if (!a.settings) t.Fatal("The main-menu Settings entry must open settings");
+    a.settingsKey(tui.KeyMsg{Key:"enter"});
+    if (a.popup != "themes") t.Fatal("The Settings theme button must open the picker");
+}

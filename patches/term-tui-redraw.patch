@@ -1,0 +1,172 @@
+--- a/term/tui/render.oc
++++ b/term/tui/render.oc
+@@ -2,6 +2,7 @@
+ 
+ import "os";
+ import "term";
++import "io";
+ 
+ // Terminal column approximation for common combining and East Asian scalars.
+ // Grapheme clustering and emoji ZWJ composition are not implemented.
+@@ -71,12 +72,65 @@
+     result[used] = 27; result[used+1] = 91; result[used+2] = 48; result[used+3] = 109; used += 4;
+     return storage[:used] -> string, row;
+ }
+-func render(output os.File, view string, previousRows int, alternate bool, size term.Size) Result<int> {
+-    prefix := "\r";
+-    if (alternate) prefix = "\x1b[H";
+-    else for (i := 0; i < previousRows; i++) prefix += "\x1b[1A";
+-    text, rows := frame(view, size);
+-    written := output.Write(prefix + "\x1b[0m\x1b[J" + text);
+-    if (written == Result<int>.error) return Result<int>.error(written.(Result<int>.error));
++// Make each row self-contained, retaining inherited SGR styles across newlines.
++// Comparing plain row bytes alone would miss a color changed on an earlier row.
++func styledLines(text string) string[] {
++    result := string[]{};
++    storage := text -> i8[]; source := storage.data;
++    active := ""; initial := ""; start := 0;
++    for (i := 0; i < len(text);) {
++        if (source[i] == 27 && i+1 < len(text) && source[i+1] == 91) {
++            end := i+2;
++            for (; end < len(text) && source[end] != 109; end++) {}
++            if (end < len(text)) {
++                sequence := text[i:end+1];
++                if (sequence == "\x1b[0m" || sequence == "\x1b[m") active = "";
++                else active += sequence;
++                i = end+1; continue;
++            }
++        }
++        if (source[i] == 10) {
++            end := i > start && source[i-1] == 13 ? i-1 : i;
++            result.append("\x1b[0m"+initial+text[start:end]+"\x1b[0m");
++            start = i+1; initial = active;
++        }
++        i++;
++    }
++    result.append("\x1b[0m"+initial+text[start:]+"\x1b[0m");
++    return result;
++}
++
++// Build a single synchronized write. Paint before erasing trailing content;
++// never blank the viewport before drawing its replacement.
++func paint(view string, previousView string, previousRows int, alternate bool, size term.Size, force bool) (string, int) {
++    text, rows := frame(view,size);
++    if (!alternate) {
++        prefix := "\r";
++        for (i := 0; i < previousRows; i++) prefix += "\x1b[1A";
++        return "\x1b[?2026h"+prefix+"\x1b[0m"+text+"\x1b[0m\x1b[J\x1b[?2026l", rows;
++    }
++    next := styledLines(text);
++    previous := string[]{};
++    if (!force) {
++        old, ignored := frame(previousView,size);
++        previous = styledLines(old);
++    }
++    payload := "";
++    for (i := 0; i < len(next); i++) {
++        if (!force && i < len(previous) && next[i] == previous[i]) continue;
++        payload += "\x1b["+io.Sprint(i+1)+";1H"+next[i]+"\x1b[0m\x1b[K";
++    }
++    // Shrinking views and resizes must erase rows which no longer belong to it.
++    limit := force ? size.Height : previousRows+1;
++    for (i := len(next); i < limit && i < size.Height; i++) payload += "\x1b["+io.Sprint(i+1)+";1H\x1b[0m\x1b[K";
++    if (payload == "") return "",rows;
++    return "\x1b[?2026h"+payload+"\x1b[?2026l",rows;
++}
++func render(output os.File, view string, previousView string, previousRows int, alternate bool, size term.Size, force bool) Result<int> {
++    text, rows := paint(view,previousView,previousRows,alternate,size,force);
++    if (text != "") {
++        written := output.Write(text);
++        if (written == Result<int>.error) return Result<int>.error(written.(Result<int>.error));
++    }
+     return Result<int>.value(rows);
+ }
+--- a/term/tui/program.oc
++++ b/term/tui/program.oc
+@@ -120,7 +120,7 @@
+ func restore(input os.File) { term.Restore(input).unwrap(); }
+ func leaveMouse(output os.File) { output.Write("\x1b[?1002l\x1b[?1006l").unwrap(); }
+ func leaveScreen(output os.File, alternate bool) {
+-    output.Write(alternate ? "\x1b[?25h\x1b[?1049l" : "\x1b[?25h\r\n").unwrap();
++    output.Write("\x1b[?2026l"+(alternate ? "\x1b[?25h\x1b[?1049l" : "\x1b[?25h\r\n")).unwrap();
+ }
+ // Run is single-use. Init, Update, and View run serially on the calling thread.
+ // All workers are cancelled and joined before returning or unwinding a panic.
+@@ -200,7 +200,7 @@
+         if (dirty && !program.options.Headless) {
+             view := state[0].View();
+             if (view != lastView[0] || forcePaint) {
+-                painted := render(output, view, rows, program.options.AltScreen, size);
++                painted := render(output, view, lastView[0], rows, program.options.AltScreen, size, forcePaint);
+                 if (painted == Result<int>.error) return Result<Model>.error(painted.(Result<int>.error));
+                 rows = painted.unwrap(); lastView[0] = view;
+                 forcePaint = false;
+--- a/term/tui/render_test.oc
++++ b/term/tui/render_test.oc
+@@ -26,3 +26,37 @@
+         });
+     }
+ }
++
++func hasPaint(text string, fragment string) bool {
++    for (i := 0; i+len(fragment) <= len(text); i++) if (text[i:i+len(fragment)] == fragment) return true;
++    return false;
++}
++func TestPaintOnlyChangedRows(t *testing.T) {
++    painted, rows := paint("one\nTWO\nthree","one\ntwo\nthree",2,true,term.Size{Width:30,Height:8},false);
++    if (rows != 2 || !hasPaint(painted,"\x1b[2;1H") || hasPaint(painted,"\x1b[1;1H") || hasPaint(painted,"\x1b[3;1H")) t.Fatal("Only the changed row should be painted");
++    if (hasPaint(painted,"\x1b[J") || hasPaint(painted,"\x1b[2J")) t.Fatal("Painting must not clear the viewport");
++    if (!hasPaint(painted,"\x1b[?2026h") || !hasPaint(painted,"\x1b[?2026l")) t.Fatal("Each paint must be synchronized");
++}
++func TestPaintUnchangedAndClippedViews(t *testing.T) {
++    painted, rows := paint("abcdNEW","abcdOLD",0,true,term.Size{Width:5,Height:8},false);
++    if (painted != "" || rows != 0) t.Fatal("Changes outside the visible viewport should not paint");
++    same, ignored := paint("same\nview","same\nview",1,true,term.Size{Width:20,Height:8},false);
++    if (same != "") t.Fatal("Unchanged views should emit no bytes");
++}
++func TestPaintInheritedStyles(t *testing.T) {
++    painted, rows := paint("\x1b[32mfirst\nsecond","\x1b[31mfirst\nsecond",1,true,term.Size{Width:20,Height:8},false);
++    if (!hasPaint(painted,"\x1b[2;1H\x1b[0m\x1b[32msecond")) t.Fatal("Inherited style changes must repaint subsequent rows");
++    updated, ignored := paint("\x1b[1mfirst\n界x","\x1b[1mfirst\n界y",1,true,term.Size{Width:20,Height:8},false);
++    if (hasPaint(updated,"first") || !hasPaint(updated,"\x1b[1m界x")) t.Fatal("Changed Unicode rows must retain inherited styles without painting unchanged rows");
++}
++func TestPaintShrinkAndForce(t *testing.T) {
++    painted, rows := paint("short","a much longer line\nstale\nremoved",2,true,term.Size{Width:30,Height:8},false);
++    if (rows != 0 || !hasPaint(painted,"short") || !hasPaint(painted,"\x1b[K") || !hasPaint(painted,"\x1b[2;1H\x1b[0m\x1b[K") || !hasPaint(painted,"\x1b[3;1H\x1b[0m\x1b[K")) t.Fatal("Shrinking views must erase stale columns and rows");
++    forced, ignored := paint("same","same",0,true,term.Size{Width:10,Height:3},true);
++    if (!hasPaint(forced,"\x1b[1;1H") || !hasPaint(forced,"\x1b[3;1H")) t.Fatal("Resize must force repaint and clear stale rows");
++}
++func TestInlinePaintsBeforeErase(t *testing.T) {
++    painted, rows := paint("new\nview","old\nview",1,false,term.Size{Width:20,Height:8},false);
++    expected := "\x1b[?2026h\r\x1b[1A\x1b[0mnew\r\nview\x1b[0m\x1b[0m\x1b[J\x1b[?2026l";
++    if (painted != expected || rows != 1) t.Fatal("Inline rendering must retain its anchor and erase only after painting");
++}
+--- a/term/tui/tests/test_tui.py
++++ b/term/tui/tests/test_tui.py
+@@ -41,7 +41,8 @@
+ 
+     setup_bytes = b""
+     try:
+-        expect(b"VIEW:80\r\nready")
++        expect(b"ready")
++        assert b"VIEW:80" in setup_bytes
+         # Setup precedes the first rendered frame.
+         if mode != "inline":
+             assert b"\x1b[?1006h\x1b[?1002h" in setup_bytes
+--- a/term/tui/README.md
++++ b/term/tui/README.md
+@@ -171,6 +171,14 @@
+ an `unknown` key. Extra mouse buttons and legacy X10 reports are unsupported.
+ 
+ Sizing is polled approximately every 100ms, without installing signal handlers.
++Alternate-screen views repaint only changed styled rows. Resizing forces a full
++repaint; shorter rows and removed rows clear their stale content after painting.
++Inline views repaint from their original anchor, also erasing stale content after
++painting. Neither path clears the viewport before painting a replacement frame.
++Each update is wrapped in synchronized output mode 2026 so terminals that support
++it can display the frame atomically; other terminals still benefit from reduced
++painting. Normal exit and error cleanup disable synchronized output.
++
+ Views redraw when changed or resized, clear stale content, translate newlines
+ to CRLF, and accept SGR color/style escapes. Other control characters are
+ filtered. The viewport clips excess lines and columns, reserving the last

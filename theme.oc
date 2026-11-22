@@ -1,0 +1,113 @@
+package main;
+
+// Ocean Dark is always available, even before installation. Loaded TOML themes
+// replace this palette only after a successful settings save or startup load.
+currentTheme: Theme = defaultTheme();
+func themeColor(key string) string { return currentTheme.colors[key]; }
+func surface(foreground string, background string, bold bool) string {
+    return "\x1b["+(bold ? "1;" : "22;")+"38;2;"+foreground+";48;2;"+background+"m";
+}
+func themeBase() string { return "\x1b[0m"+surface(themeColor("foreground"),themeColor("background"),false); }
+func themeMuted() string { return surface(themeColor("muted"),themeColor("background"),false); }
+func themeTitle() string { return surface(themeColor("accent"),themeColor("background"),true); }
+func themePanel() string { return surface(themeColor("foreground"),themeColor("background"),false); }
+func themeFocus() string { return surface(themeColor("text"),themeColor("selection"),true); }
+func themeDialog() string { return surface(themeColor("text"),themeColor("surface"),false); }
+func themeDanger() string { return surface(themeColor("danger"),themeColor("background"),true); }
+
+func tileAppearance(g *Game, index int) (string, string) {
+    value := g.cells[index]; state := g.visible[index];
+    x := index%g.width; y := index/g.width;
+    symbol := "·";
+    foreground := themeColor("covered_text");
+    background := themeColor((x+y)%2 == 0 ? "covered_a" : "covered_b");
+    bold := false;
+    if (state == 1) {
+        // A continuous, recessed surface makes revealed areas easy to scan.
+        symbol = value == 0 ? " " : ioNumber(value);
+        background = themeColor("open_background");
+        foreground = themeColor(value > 0 ? "number_"+ioNumber(value) : "muted");
+        bold = value > 0;
+    }
+    if (state == 2 || (g.won && value == -1)) {
+        symbol = "⚑"; foreground = themeColor("flag"); background = themeColor("flag_background"); bold = true;
+    }
+    if (g.lost && value == -1) {
+        symbol = "*"; foreground = themeColor("danger"); background = themeColor("danger_background"); bold = true;
+    }
+    if (g.lost && state == 2 && value != -1) {
+        symbol = "X"; foreground = themeColor("danger"); background = themeColor("danger_background"); bold = true;
+    }
+    if (index == g.cursor) {
+        foreground = themeColor("cursor_text");
+        background = themeColor(symbol == "⚑" ? "flag_cursor" : "cursor");
+        bold = true;
+    }
+    return symbol, surface(foreground,background,bold);
+}
+// Digits are fixed ASCII glyphs; keep the board independent of formatting.
+func ioNumber(value int) string {
+    if (value < 0) return "*";
+    digit := []i8{(48+value) -> i8};
+    return digit -> string;
+}
+
+func (a *App) themedView(text string) string {
+    if (a.overwrite || a.popup != "") text = a.dialogView(text);
+    return themeFrame(text,a.width,a.height);
+}
+// Paint the full viewport, restoring the base surface after each styled span.
+// This avoids depending on the user's terminal background for gaps and margins.
+func appendThemeBuffer(output buffer<i8>, used *int, text string) {
+    storage := text -> []i8; source := storage.data;
+    offset := *used;
+    for (i := 0; i < len(text); i++) output[offset+i] = source[i];
+    *used = offset+len(text);
+}
+func themeFrame(text string, width int, height int) string {
+    if (width < 2 || height < 1) return text;
+    base := themeBase();
+    storage := text -> []i8; source := storage.data;
+    // Each reset can expand to the base style. Reserve for that worst case,
+    // line padding, and the empty rows, then write directly into the buffer.
+    capacity := len(text)*20+(width+len(base)*3)*height+len(base)+8;
+    outputStorage: [capacity]i8;
+    result := outputStorage.data; used := 0;
+    appendThemeBuffer(result,&used,base);
+    column := 0; row := 0;
+    for (i := 0; i < len(text) && row < height;) {
+        if (source[i] == 27) {
+            end := i+1;
+            for (; end < len(text) && source[end] != 109; end++) {}
+            if (end < len(text)) {
+                if (end-i == 3 && source[i+2] == 48) appendThemeBuffer(result,&used,base);
+                else for (j := i; j <= end; j++) { result[used] = source[j]; used++; }
+                i = end+1; continue;
+            }
+        }
+        if (source[i] == 10) {
+            appendThemeBuffer(result,&used,base);
+            for (; column < width-1; column++) { result[used] = 32; used++; }
+            row++; column = 0; i++;
+            if (row < height) { result[used] = 10; used++; appendThemeBuffer(result,&used,base); }
+            continue;
+        }
+        first := (source[i] -> u8) -> int;
+        size := first < 128 ? 1 : (first < 224 ? 2 : (first < 240 ? 3 : 4));
+        scalar := size == 1 ? first : first & (size == 2 ? 31 : (size == 3 ? 15 : 7));
+        for (j := 1; j < size && i+j < len(text); j++) scalar = scalar*64+((source[i+j] -> u8) -> int & 63);
+        cells := first < 128 ? 1 : glyphWidth(scalar);
+        if (column+cells <= width-1) for (j := 0; j < size && i+j < len(text); j++) { result[used] = source[i+j]; used++; }
+        column += cells; i += size;
+    }
+    if (row < height) {
+        appendThemeBuffer(result,&used,base);
+        for (; column < width-1; column++) { result[used] = 32; used++; }
+        for (row++; row < height; row++) {
+            result[used] = 10; used++; appendThemeBuffer(result,&used,base);
+            for (x := 0; x < width-1; x++) { result[used] = 32; used++; }
+        }
+    }
+    appendThemeBuffer(result,&used,"\x1b[0m");
+    return outputStorage[:used] -> string;
+}

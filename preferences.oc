@@ -1,0 +1,253 @@
+package main;
+
+import "os";
+import "io";
+import "time";
+import "encoding/json";
+
+struct Theme { id, name string; colors map[string]string; }
+struct Preferences { theme string; }
+extern *void opendir(buffer<i8> path);
+extern i32 closedir(*void directory);
+extern buffer<i8> getenv(buffer<i8> name);
+extern i32 mkdir(buffer<i8> path, u32 mode);
+extern i32 rename(buffer<i8> oldPath, buffer<i8> newPath);
+extern i32 unlink(buffer<i8> path);
+
+func environment(name string) string {
+    key := (name+"\0") -> []i8;
+    raw := extern.getenv(key.data);
+    if ((raw -> int) == 0) return "";
+    result := []i8{};
+    for (i := 0; raw[i] != 0; i++) result.append(raw[i]);
+    return result -> string;
+}
+func configDirectory() string {
+    override := environment("MINESWEEPER_CONFIG_DIR");
+    if (override != "") return override;
+    home := environment("HOME");
+    return home == "" ? "" : home+"/.config/minesweeper";
+}
+func directoryExists(path string) bool {
+    name := (path+"\0") -> []i8;
+    handle := extern.opendir(name.data);
+    if ((handle -> int) == 0) return false;
+    extern.closedir(handle); return true;
+}
+func createDirectories(path string) bool {
+    if (path == "") return false;
+    for (i := 1; i <= len(path); i++) if (i == len(path) || path[i] == '/') {
+        part := path[:i];
+        if (part == "" || directoryExists(part)) continue;
+        name := (part+"\0") -> []i8;
+        if (extern.mkdir(name.data,448) != 0 && !directoryExists(part)) return false;
+    }
+    return directoryExists(path);
+}
+func fileExists(path string) bool {
+    opened := os.Open(path,os.FileMode.Read);
+    if (opened.hasError()) return false;
+    opened.unwrap().Close(); return true;
+}
+func readText(path string, limit int) Result<string> {
+    opened := os.Open(path,os.FileMode.Read);
+    if (opened.hasError()) return Result<string>.error("Cannot open "+path);
+    file := opened.unwrap(); defer file.Close();
+    size := file.Size();
+    if (size.hasError() || size.unwrap() > limit) return Result<string>.error("File is unreadable or too large: "+path);
+    bytes := file.Readchunk(limit+1);
+    if (bytes.hasError() || len(bytes.unwrap()) > limit) return Result<string>.error("Cannot read "+path);
+    return Result<string>.value(bytes.unwrap() -> string);
+}
+func writeText(path string, text string) Result<bool> {
+    opened := os.Open(path,os.FileMode.Write);
+    if (opened.hasError()) return Result<bool>.error("Cannot write "+path);
+    file := opened.unwrap(); defer file.Close();
+    written := file.Write(text);
+    if (written.hasError()) return Result<bool>.error("Cannot write "+path);
+    return Result<bool>.value(true);
+}
+func savePreferences(id string) Result<bool> {
+    root := configDirectory();
+    if (!createDirectories(root) || !createDirectories(root+"/themes")) return Result<bool>.error("Cannot create the configuration directory.");
+    encoded := json.Marshal(Preferences{theme:id});
+    if (encoded.hasError()) return Result<bool>.error(encoded.error());
+    path := root+"/settings.json";
+    temporary := path+".tmp."+io.Sprint(time.Monotonic());
+    written := writeText(temporary,encoded.unwrap()+"\n");
+    if (written.hasError()) return written;
+    oldName := (temporary+"\0") -> []i8; newName := (path+"\0") -> []i8;
+    if (extern.rename(oldName.data,newName.data) != 0) {
+        extern.unlink(oldName.data);
+        return Result<bool>.error("Cannot replace settings.json.");
+    }
+    return Result<bool>.value(true);
+}
+func savedThemeID(text string) Result<string> {
+    decoded := json.Unmarshal(text);
+    if (decoded.hasError()) return Result<string>.error("Invalid settings.json; using Ocean Dark.");
+    switch (value := decoded.unwrap().(type)) {
+        case map[string]any:
+            selected, exists := value["theme"];
+            if (exists) switch (id := selected.(type)) {
+                case string:
+                    if (id != "") return Result<string>.value(id);
+            }
+    }
+    return Result<string>.error("No valid theme in settings.json; using Ocean Dark.");
+}
+func defaultTheme() Theme {
+    return Theme{id:"ocean-dark",name:"Ocean Dark",colors:map[string]string{
+        "background":"8;17;32", "foreground":"194;204;214", "muted":"160;174;194",
+        "accent":"121;184;255", "text":"232;239;249", "surface":"13;24;43",
+        "selection":"34;57;92", "covered_text":"110;120;133",
+        "covered_a":"24;43;70", "covered_b":"34;57;92", "open_background":"13;24;43",
+        "flag":"121;184;255", "flag_background":"34;57;92", "flag_cursor":"155;202;255",
+        "cursor":"121;184;255", "cursor_text":"8;17;32", "danger":"216;115;107",
+        "danger_background":"24;43;70", "number_1":"125;176;230", "number_2":"131;162;113",
+        "number_3":"213;141;82", "number_4":"168;172;223", "number_5":"171;143;186",
+        "number_6":"139;191;202", "number_7":"232;239;249", "number_8":"132;170;200"
+    }};
+}
+func trim(text string) string {
+    start := 0; end := len(text);
+    for (start < end && (text[start] == 32 || text[start] == 9 || text[start] == 13)) start++;
+    for (end > start && (text[end-1] == 32 || text[end-1] == 9 || text[end-1] == 13)) end--;
+    return text[start:end];
+}
+func themeLines(text string) []string {
+    lines := []string{}; start := 0;
+    for (i := 0; i < len(text); i++) if (text[i] == 10) { lines.append(text[start:i]); start = i+1; }
+    lines.append(text[start:]); return lines;
+}
+func themeString(text string) Result<string> {
+    text = trim(text);
+    if (len(text) < 2 || (text[0] != 34 && text[0] != 39)) return Result<string>.error("Expected a quoted string.");
+    quote := text[0]; escaped := false; end := -1;
+    for (i := 1; i < len(text); i++) {
+        if (quote == 34 && !escaped && text[i] == 92) { escaped = true; continue; }
+        if (!escaped && text[i] == quote) { end = i; break; }
+        escaped = false;
+    }
+    if (end < 0) return Result<string>.error("Unterminated string.");
+    rest := trim(text[end+1:]);
+    if (rest != "" && rest[0] != '#') return Result<string>.error("Unexpected text after the string.");
+    if (quote == 39) return Result<string>.value(text[1:end]);
+    value := json.Unmarshal(text[:end+1]);
+    if (value.hasError()) return Result<string>.error("Invalid string escape.");
+    switch (decoded := value.unwrap().(type)) {
+        case string: return Result<string>.value(decoded);
+    }
+    return Result<string>.error("Invalid string.");
+}
+func hexDigit(byte i8) int {
+    if (byte >= '0' && byte <= '9') return byte-'0';
+    if (byte >= 'a' && byte <= 'f') return byte-'a'+10;
+    if (byte >= 'A' && byte <= 'F') return byte-'A'+10;
+    return -1;
+}
+func themeRGB(text string) Result<string> {
+    if (len(text) != 7 || text[0] != '#') return Result<string>.error("Colors must use #RRGGBB.");
+    parts := []string{};
+    for (i := 1; i < 7; i += 2) {
+        high := hexDigit(text[i]); low := hexDigit(text[i+1]);
+        if (high < 0 || low < 0) return Result<string>.error("Invalid hexadecimal color.");
+        parts.append(io.Sprint(high*16+low));
+    }
+    return Result<string>.value(parts[0]+";"+parts[1]+";"+parts[2]);
+}
+// Themes use a deliberately small TOML schema: a name and quoted hex colors.
+// Missing colors inherit Ocean Dark. Reject typos and duplicates rather than
+// silently producing a partially broken palette.
+func parseTheme(text string, id string) Result<Theme> {
+    theme := defaultTheme(); theme.id = id; theme.name = id;
+    section := ""; seen := map[string]bool{}; colorsSeen := false;
+    for (number, raw := range themeLines(text)) {
+        line := trim(raw);
+        if (line == "" || line[0] == '#') continue;
+        if (line[0] == '[') {
+            close := -1;
+            for (i := 1; i < len(line); i++) if (line[i] == ']') { close = i; break; }
+            if (close < 0) return Result<Theme>.error("Invalid table on line "+io.Sprint(number+1));
+            rest := trim(line[close+1:]);
+            if (line[:close+1] != "[colors]" || colorsSeen || (rest != "" && rest[0] != '#')) return Result<Theme>.error("Only one [colors] table is supported.");
+            section = "colors"; colorsSeen = true; continue;
+        }
+        equal := -1;
+        for (i := 0; i < len(line); i++) if (line[i] == '=') { equal = i; break; }
+        if (equal < 1) return Result<Theme>.error("Expected key = value on line "+io.Sprint(number+1));
+        key := trim(line[:equal]); fullKey := section+"."+key;
+        _, duplicate := seen[fullKey];
+        if (duplicate) return Result<Theme>.error("Duplicate theme key: "+key);
+        seen[fullKey] = true;
+        value := themeString(line[equal+1:]);
+        if (value.hasError()) return Result<Theme>.error("Line "+io.Sprint(number+1)+": "+value.error());
+        if (section == "") {
+            if (key != "name") return Result<Theme>.error("Unknown theme key: "+key);
+            name := value.unwrap();
+            if (name == "" || len(name) > 128 || displaySafe(name) != name) return Result<Theme>.error("Invalid theme name.");
+            theme.name = name;
+        } else {
+            _, known := theme.colors[key];
+            if (!known) return Result<Theme>.error("Unknown color: "+key);
+            rgb := themeRGB(value.unwrap());
+            if (rgb.hasError()) return Result<Theme>.error(key+": "+rgb.error());
+            theme.colors[key] = rgb.unwrap();
+        }
+    }
+    return Result<Theme>.value(theme);
+}
+func themeFile(name string) bool { return len(name) > 5 && name[len(name)-5:] == ".toml"; }
+func loadThemes(root string) ([]Theme, string) {
+    themes := []Theme{defaultTheme()};
+    if (root == "" || !directoryExists(root+"/themes")) return themes,"";
+    names := directoryFilesAt(root+"/themes");
+    if (names.hasError()) return themes,"Cannot list installed themes.";
+    invalid := 0;
+    for (_, name := range names.unwrap()) {
+        if (!themeFile(name)) continue;
+        text := readText(root+"/themes/"+name,65536);
+        if (text.hasError()) { invalid++; continue; }
+        parsed := parseTheme(text.unwrap(),name[:len(name)-5]);
+        if (parsed.hasError()) { invalid++; continue; }
+        theme := parsed.unwrap();
+        if (theme.id == "ocean-dark") themes[0] = theme;
+        else themes.append(theme);
+    }
+    return themes, invalid == 0 ? "" : "Skipped "+io.Sprint(invalid)+" invalid theme file(s).";
+}
+func (a *App) loadPreferences() {
+    currentTheme = defaultTheme();
+    root := configDirectory();
+    if (root == "" || !fileExists(root+"/settings.json")) return;
+    text := readText(root+"/settings.json",16384);
+    if (text.hasError()) { a.setNotice("Cannot read settings.json; using Ocean Dark."); return; }
+    saved := savedThemeID(text.unwrap());
+    if (saved.hasError()) { a.setNotice(saved.error()); return; }
+    themes, ignored := loadThemes(root);
+    for (_, theme := range themes) if (theme.id == saved.unwrap()) { currentTheme = theme; return; }
+    a.setNotice("Saved theme is unavailable; using Ocean Dark.");
+}
+func installConfiguration() Result<int> {
+    root := configDirectory();
+    if (!createDirectories(root) || !createDirectories(root+"/themes")) return Result<int>.error("Cannot create the configuration directory.");
+    if (!fileExists(root+"/settings.json")) {
+        saved := savePreferences("ocean-dark");
+        if (saved.hasError()) return Result<int>.error(saved.error());
+    }
+    if (!directoryExists("themes")) return Result<int>.value(0);
+    files := directoryFilesAt("themes");
+    if (files.hasError()) return Result<int>.error(files.error());
+    count := 0;
+    for (_, name := range files.unwrap()) {
+        if (!themeFile(name) || fileExists(root+"/themes/"+name)) continue;
+        text := readText("themes/"+name,65536);
+        if (text.hasError()) return Result<int>.error(text.error());
+        parsed := parseTheme(text.unwrap(),name[:len(name)-5]);
+        if (parsed.hasError()) return Result<int>.error(name+": "+parsed.error());
+        copied := writeText(root+"/themes/"+name,text.unwrap());
+        if (copied.hasError()) return Result<int>.error(copied.error());
+        count++;
+    }
+    return Result<int>.value(count);
+}

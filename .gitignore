@@ -1,0 +1,7 @@
+/minesweeper
+*.save
+__pycache__/
+*.pyc
+.agents/
+.codex/
+.aws/

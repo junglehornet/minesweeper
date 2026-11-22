@@ -1,0 +1,139 @@
+# Ocean Minesweeper
+
+A native Linux Minesweeper TUI written in [Ocean](https://github.com/ocean-foundation/ocean-c), using its built-in `term/tui` library. Play with the keyboard, the mouse, or both.
+
+Features include three difficulties, safe first reveals, automatic empty-area reveals, chording, save/resume with custom filenames, and searchable TOML themes.
+
+## Build and run
+
+Use a recent Ocean compiler with its matching standard library, including `term/tui` mouse support and the incremental renderer.
+
+```sh
+ocean check .
+ocean build . -o minesweeper
+./minesweeper
+```
+
+Alternatively, run `ocean run .`. Use an interactive terminal with true-color ANSI support and xterm-compatible mouse reporting. A window of at least 64 columns and 24 rows is recommended; smaller windows show a scrollable portion of the board. Expert fits in full at 96 columns and 28 rows.
+
+## Install themes and settings
+
+From the repository directory:
+
+```sh
+./minesweeper --install
+```
+
+This creates:
+
+```text
+~/.config/minesweeper/
+├── settings.json
+└── themes/
+    ├── ocean-dark.toml
+    ├── ocean-light.toml
+    ├── midnight.toml
+    └── graphite.toml
+```
+
+The installer copies missing `*.toml` files from `./themes`. Existing settings and theme files are preserved, including user edits. If `./themes` does not exist, installation still creates the configuration directories and default settings. The command exits after installation and does not need a terminal.
+
+A new configuration starts with:
+
+```json
+{"theme":"ocean-dark"}
+```
+
+Normal startup does not create configuration files. Without configuration, the game uses its hardcoded Ocean Dark palette. Ocean Dark remains available if theme files are absent; invalid settings or an unavailable saved theme also fall back to it.
+
+`MINESWEEPER_CONFIG_DIR` can override the configuration directory for portable setups and isolated tests. Otherwise the path is exactly `~/.config/minesweeper`.
+
+## Choose a theme
+
+Open **Settings → Themes** on the main menu, press **t** from the menu or game, or click **[t]** on the game toolbar.
+
+Type into the filter to narrow the list by theme name or filename. Matching is case-insensitive for ASCII letters. **Tab** and **Shift+Tab** cycle through all themes when the filter is empty, or just the matching themes otherwise. Up/Down also work. **Enter** applies the selected theme and atomically saves its filename stem in `settings.json`. **Escape** cancels without changing the current theme or saved preference.
+
+Click a listed theme to apply it, or use the mouse wheel to navigate. Backspace edits the filter and Ctrl+U clears it. Long queries clip at the start so the text stays inside its box. The game timer pauses while a popup is open.
+
+Bundled themes:
+
+| Theme | Palette |
+| --- | --- |
+| Ocean Dark | Ocean editor theme colors: navy surfaces, blue cursor, syntax accents |
+| Ocean Light | The corresponding light Ocean editor palette |
+| Midnight | The original charcoal and slate-blue Minesweeper palette |
+| Graphite | Neutral dark gray surfaces with restrained number accents |
+
+Ocean Dark and Ocean Light derive their palettes from `ocean-c/editors/helix/themes/`, shared with Ocean's VS Code and Rex themes.
+
+## Custom themes
+
+Add a lowercase `.toml` file to `~/.config/minesweeper/themes/`. Its filename, without `.toml`, is its stable ID. The picker reloads installed files whenever it opens. Invalid theme files are skipped with a message.
+
+Theme files use a small TOML schema: an optional quoted `name`, then a `[colors]` table containing quoted `#RRGGBB` values. Missing colors inherit the hardcoded Ocean Dark defaults. Unknown keys, duplicates, invalid colors, and invalid strings are rejected. See [themes/README.md](themes/README.md) for all color roles and the complete bundled examples.
+
+```toml
+name = "My Blue Theme"
+
+[colors]
+background = "#101820"
+accent = "#88bbff"
+cursor = "#aaccff"
+```
+
+## Play
+
+Choose Beginner (9×9, 10 mines), Intermediate (16×16, 40 mines), or Expert (30×16, 99 mines). The first reveal and its neighbors are safe. Empty regions open automatically. Reveal every non-mine cell to win.
+
+| Action | Keyboard | Mouse |
+| --- | --- | --- |
+| Choose menu entry | Up/Down, j/k, Tab; Enter/Space | Click entry |
+| Start difficulty | 1 / 2 / 3 in menu | Click difficulty |
+| Move selection | Arrows, WASD, hjkl | Click a cell |
+| Reveal | Enter / Space | Left click |
+| Toggle flag | f | Right click |
+| Chord | c, or reveal an open number | Middle click, or left click an open number |
+| Toggle left-click flagging | — | Click Flag button |
+| Pan viewport | Move selection past the visible edge | Click < / > / ^ / v |
+| Reset at current difficulty | r | Click Reset |
+| Save | v | Click Save |
+| Save to a custom filename | Shift+S | Click Save as |
+| Theme picker | t | Click [t], or Settings → Themes |
+| Save and return to menu | m / Escape | Click Menu |
+| Save and quit | q during game | Click Save+Quit |
+| Quit main menu | q | Click Quit |
+| Exit immediately without saving | Ctrl+C | — |
+
+A chord reveals the unflagged neighbors of an open number when its adjacent flag count matches the number. Incorrect flags can make a chord reveal a mine.
+
+Reset clears reveals and flags, resets the timer and selection, and creates a fresh board at the same difficulty. It does not replace the saved file until you save again. Resume continues the current unfinished game, or loads the default saved file if no unfinished game is active.
+
+## Save and resume
+
+Save initially writes `minesweeper.save` in the working directory, preserving the board, flags, reveals, selection, and elapsed time. The save confirmation disappears after 900 ms. Completed games cannot be saved.
+
+**Save as** opens a filename entry for relative or absolute paths. Enter submits, Backspace erases, Ctrl+U clears, Tab changes focus between the field and buttons, and Escape cancels. Long filenames clip from the start, preserving their ending and the popup border. A successful save under a new name makes that path the current game's save target.
+
+Updating the same board's save proceeds immediately. Saving over a different board opens a centered dialog with **Overwrite**, **Save as**, and **Cancel**. Menu and quit requests also offer **Exit without saving**. Cancel returns to the game without saving or leaving it. The game timer pauses while the dialog is open.
+
+The last main-menu option, **Resume from other game**, opens a scrollable picker of files in the current directory. It includes hidden files and does not filter by save extension. Use arrows, Page Up/Down, Home/End, the mouse wheel, or click a file. The first option lets you type a path in another directory. Invalid saves show an error and leave the picker open. Loading a file makes it the game's save target.
+
+## Verify
+
+```sh
+ocean check .
+ocean test . --notty
+ocean build . -o minesweeper
+python3 tests/terminal.py
+python3 tests/preferences.py
+python3 tests/redraw.py
+```
+
+Tests cover game rules, Unicode-safe popup layout, settings and theme parsing, installation, filtering, keyboard/mouse selection, persistence, malformed files, save/resume, overwrites, resizing, and terminal cleanup. Integration tests use temporary configuration and save directories.
+
+The built-in TUI's incremental renderer repaints only changed styled rows, clears stale content after painting, and uses synchronized output mode 2026 where supported. `tests/redraw.py` checks actual PTY traffic: cursor movement updates its board row, timer ticks update the status row, and neither clears the viewport. Pass `--baseline /path/to/unpatched-binary` to compare traffic.
+
+The historical renderer patch in `patches/` and its temporary-library helper in
+`scripts/ocean.py` are retained for reference. Normal builds use the compiler's
+matching standard library directly; no patch wrapper is needed.

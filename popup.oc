@@ -1,0 +1,173 @@
+package main;
+
+// Match term/tui's cell-width approximation for wide and combining characters.
+func glyphWidth(scalar int) int {
+    if ((scalar >= 768 && scalar <= 879) || (scalar >= 6832 && scalar <= 6911) ||
+        (scalar >= 7616 && scalar <= 7679) || (scalar >= 65024 && scalar <= 65039) ||
+        (scalar >= 65056 && scalar <= 65071) || scalar == 8205) return 0;
+    if ((scalar >= 4352 && scalar <= 4447) || scalar == 9001 || scalar == 9002 ||
+        (scalar >= 11904 && scalar <= 42191) || (scalar >= 44032 && scalar <= 55203) ||
+        (scalar >= 63744 && scalar <= 64255) || (scalar >= 65040 && scalar <= 65049) ||
+        (scalar >= 65072 && scalar <= 65510) || (scalar >= 127744 && scalar <= 129791) ||
+        (scalar >= 131072 && scalar <= 262141)) return 2;
+    return 1;
+}
+func glyphSize(text string, index int) int {
+    first := (text[index] -> u8) -> int;
+    if (first < 128 || first < 194 || first > 244) return 1;
+    size := first < 224 ? 2 : (first < 240 ? 3 : 4);
+    if (index+size > len(text)) return 1;
+    for (i := 1; i < size; i++) {
+        byte := (text[index+i] -> u8) -> int;
+        if (byte < 128 || byte > 191) return 1;
+    }
+    next := (text[index+1] -> u8) -> int;
+    if ((first == 224 && next < 160) || (first == 237 && next >= 160) ||
+        (first == 240 && next < 144) || (first == 244 && next >= 144)) return 1;
+    return size;
+}
+func glyphScalar(text string, index int) int {
+    size := glyphSize(text,index);
+    first := (text[index] -> u8) -> int;
+    value := size == 1 ? first : first & (size == 2 ? 31 : (size == 3 ? 15 : 7));
+    for (i := 1; i < size; i++) value = value*64+((text[index+i] -> u8) -> int & 63);
+    return value;
+}
+func textCells(text string) int {
+    cells := 0;
+    for (i := 0; i < len(text); i += glyphSize(text,i)) cells += glyphWidth(glyphScalar(text,i));
+    return cells;
+}
+// Filenames can contain terminal control bytes. Display them harmlessly while
+// retaining the original filename for filesystem operations.
+func displaySafe(text string) string {
+    result := []i8{};
+    for (i := 0; i < len(text);) {
+        scalar := glyphScalar(text,i); size := glyphSize(text,i);
+        if (scalar < 32 || (scalar >= 127 && scalar <= 159) || (size == 1 && scalar >= 128)) result.append(63);
+        else for (j := 0; j < size; j++) result.append(text[i+j]);
+        i += size;
+    }
+    return result -> string;
+}
+func clipText(raw string, width int, tail bool) string {
+    if (width <= 0) return "";
+    text := displaySafe(raw);
+    cells := textCells(text);
+    if (cells <= width) return text;
+    if (tail) {
+        start := 0;
+        for (start < len(text) && cells > width-1) {
+            cells -= glyphWidth(glyphScalar(text,start)); start += glyphSize(text,start);
+        }
+        for (start < len(text) && glyphWidth(glyphScalar(text,start)) == 0) start += glyphSize(text,start);
+        return "<"+text[start:];
+    }
+    end := 0; used := 0;
+    for (end < len(text)) {
+        n := glyphWidth(glyphScalar(text,end));
+        if (used+n > width-1) break;
+        used += n; end += glyphSize(text,end);
+    }
+    return text[:end]+">";
+}
+func padded(raw string, width int) string {
+    text := clipText(raw,width,false);
+    for (n := textCells(text); n < width; n++) text += " ";
+    return text;
+}
+func (a *App) dialogLabels() []string {
+    if (a.saveDestination == "save") return []string{"Overwrite", "Save as...", "Cancel"};
+    return []string{"Overwrite", "Save as...", "Exit without saving", "Cancel"};
+}
+func (a *App) dialogContent(row int) string {
+    width := a.dialogWidth()-2;
+    if (a.popup == "themes") return a.themeContent(row);
+    if (a.popup == "picker") {
+        if (row == 1) return " Resume from other game";
+        if (row == 2) return " "+(a.popupError == "" ? "Files in the current directory" : a.popupError);
+        if (row >= 4 && row < 4+a.pickerRows()) {
+            index := a.fileOffset+row-4;
+            if (index >= len(a.files)+2) return "";
+            label := index == 0 ? "Type custom filename..." : (index == len(a.files)+1 ? "Cancel" : a.files[index-1]);
+            return (index == a.fileChoice ? " > " : "   ")+label;
+        }
+        if (row == a.dialogHeight()-2) return " Up/Down / PgUp/PgDn / Enter / Esc";
+        return "";
+    }
+    if (a.popup != "") {
+        if (row == 1) return a.popup == "save" ? " Save as..." : " Resume from filename";
+        if (row == 2) return " Filename (relative or absolute path):";
+        if (row == 4) return " ["+padded(clipText(a.filename,width-6,true)+"_",width-5)+"] ";
+        if (row == 5) return " "+a.popupError;
+        if (row == 7) return (a.entryChoice == 1 ? " >" : "  ")+(a.popup == "save" ? "[ Save ]" : "[ Open ]")+(a.entryChoice == 2 ? "  >" : "   ")+"[ Cancel ]";
+        if (row == 9) return " Enter: submit  Tab: focus  Esc: cancel";
+        if (row == 10) return " Backspace: erase  Ctrl+U: clear";
+        return "";
+    }
+    if (row == 1) return " Overwrite saved game?";
+    if (row == 3) return " "+clipText(a.pendingPath == "" ? a.currentPath() : a.pendingPath,width-2,true);
+    if (row == 4) return " Contains another board. Choose an option:";
+    labels := a.dialogLabels();
+    if (row >= 5 && row < 5+len(labels)) return (row-5 == a.dialogChoice ? " > " : "   ")+labels[row-5];
+    if (row == 10) return " Arrows / Enter / Esc, or click an option";
+    return "";
+}
+// Dim the underlying screen and compose each dialog row inside a fixed border.
+func (a *App) dialogView(base string) string {
+    lines := []string{};
+    line := []i8{};
+    for (i := 0; i < len(base); i++) {
+        if (base[i] == 27) {
+            for (; i < len(base) && base[i] != 109; i++) {}
+        } else if (base[i] == 10) { lines.append(line -> string); line = {}; }
+        else line.append(base[i]);
+    }
+    lines.append(line -> string);
+    boxWidth := a.dialogWidth();
+    if (boxWidth < 8) return "";
+    left := a.dialogLeft(); top := a.dialogTop();
+    border := "+";
+    for (i := 0; i < boxWidth-2; i++) border += "-";
+    border += "+";
+    result := "";
+    for (y := 0; y < a.height; y++) {
+        background := padded(y < len(lines) ? lines[y] : "",a.width-1);
+        row := y-top;
+        if (row >= 0 && row < a.dialogHeight()) {
+            box := row == 0 || row == a.dialogHeight()-1 ? border : "|"+padded(a.dialogContent(row),boxWidth-2)+"|";
+            selected := a.popup == "picker" ? row >= 4 && row < 4+a.pickerRows() && row-4+a.fileOffset == a.fileChoice : (a.popup != "" ? (row == 4 && a.entryChoice == 0) || row == 7 : row == 5+a.dialogChoice);
+            if (a.popup == "themes") selected = row == 3 || (row >= 6 && row < 6+a.themeRows() && row-6+a.themeOffset == a.themeChoice && len(a.themeMatches) > 0);
+            style := selected ? themeFocus() : themeDialog();
+            result += themeMuted()+sliceCells(background,0,left)+"\x1b[0m"+style+box+"\x1b[0m"+themeMuted()+sliceCells(background,left+boxWidth,a.width-1)+"\x1b[0m";
+        } else result += themeMuted()+background+"\x1b[0m";
+        if (y+1 < a.height) result += "\n";
+    }
+    return result;
+}
+
+// Slice unstyled UTF-8 by terminal columns. If a wide glyph crosses the popup
+// edge, fill only its exposed cells with spaces rather than splitting its bytes.
+func sliceCells(text string, start int, end int) string {
+    result := []i8{};
+    column := 0; used := 0; keepMarks := false;
+    for (i := 0; i < len(text);) {
+        size := glyphSize(text,i); cells := glyphWidth(glyphScalar(text,i));
+        if (cells == 0) {
+            if (keepMarks) for (j := 0; j < size; j++) result.append(text[i+j]);
+        } else {
+            if (column >= end) break;
+            keepMarks = column >= start && column+cells <= end;
+            if (keepMarks) {
+                for (j := 0; j < size; j++) result.append(text[i+j]);
+                used += cells;
+            } else {
+                for (c := column; c < column+cells; c++) if (c >= start && c < end) { result.append(32); used++; }
+            }
+            column += cells;
+        }
+        i += size;
+    }
+    for (; used < end-start; used++) result.append(32);
+    return result -> string;
+}

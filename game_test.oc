@@ -1,0 +1,147 @@
+package main;
+import "testing";
+import "term/tui";
+
+func TestFirstClickAndWin(t *testing.T) {
+    for (level := 0; level < 3; level++) {
+        g := newGame(level); g.reveal(0);
+        count := 0;
+        for (i := 0; i < len(g.cells); i++) if (g.cells[i] == -1) count++;
+        if (count != g.mines || g.lost || g.cells[0] != 0) t.Fatal("First click must open a safe empty area with the correct mine count");
+        for (i := 0; i < len(g.cells); i++) if (g.cells[i] != -1 && g.visible[i] == 0) g.reveal(i);
+        if (!g.won || g.lost) t.Fatal("Revealing all safe cells must win");
+    }
+}
+func TestFlagAndLoss(t *testing.T) {
+    g := newGame(0); g.flag(0); g.reveal(0);
+    if (g.seeded || g.visible[0] != 2) t.Fatal("Flags must prevent reveals");
+    g.flag(0); g.reveal(0);
+    for (i := 0; i < len(g.cells); i++) if (g.cells[i] == -1) { g.reveal(i); break; }
+    if (!g.lost) t.Fatal("Revealing a mine must lose");
+}
+func TestMouseAndMenu(t *testing.T) {
+    a := App{menu:true,width:100,height:30};
+    a.Update(tui.MouseMsg{X:5,Y:6,Button:"left",Action:"release"});
+    a.Update(tui.MouseMsg{X:5,Y:6,Button:"left",Action:"motion"});
+    if (!a.menu || a.active) t.Fatal("Mouse release and motion must not select a menu entry");
+    a.Update(tui.MouseMsg{X:5,Y:6,Button:"left",Action:"press"});
+    if (a.menu || !a.active || a.game.width != 9) t.Fatal("Mouse must select beginner");
+    a.Update(tui.MouseMsg{X:3,Y:6,Button:"left",Action:"press"});
+    if (!a.game.seeded || a.game.lost) t.Fatal("Mouse must reveal a safe first cell");
+    a.game.visible[80] = 0;
+    a.Update(tui.MouseMsg{X:27,Y:14,Button:"right",Action:"press"});
+    if (a.game.visible[80] != 2) t.Fatal("Right press must flag a hidden cell");
+    a.Update(tui.MouseMsg{X:27,Y:14,Button:"right",Action:"release"});
+    if (a.game.visible[80] != 2) t.Fatal("Release must not toggle a flag");
+    a.Update(tui.MouseMsg{X:23,Y:3,Button:"left",Action:"press"});
+    if (!a.flagMode) t.Fatal("Mouse must toggle flag mode");
+    a.game.lost = true; // Finished games return to the menu without saving.
+    a.Update(tui.MouseMsg{X:3,Y:3,Button:"left",Action:"press"});
+    if (!a.menu) t.Fatal("Mouse must return to menu");
+}
+func TestChord(t *testing.T) {
+    g := Game{width:3,height:3,mines:1,seeded:true,cells:[]int{-1,1,0,1,1,0,0,0,0},visible:[]int{2,0,0,0,1,0,0,0,0}};
+    g.chord(4);
+    if (!g.won || g.lost) t.Fatal("Correctly flagged chord must clear neighbors");
+}
+
+func TestNoticeExpiry(t *testing.T) {
+    a := App{};
+    a.setNotice("Saved to minesweeper.save");
+    first := a.noticeRevision;
+    a.setNotice("Saved to minesweeper.save");
+    latest := a.noticeRevision;
+    a.Update(clearNoticeMsg{first});
+    if (a.notice == "") t.Fatal("An older timer must not clear a newer save notice");
+    a.Update(clearNoticeMsg{latest});
+    if (a.notice != "") t.Fatal("The current timer must clear the save notice");
+    a.setNotice("Saved to minesweeper.save");
+    saved := a.noticeRevision;
+    a.setNotice("New board. First reveal is safe. Good luck!");
+    a.Update(clearNoticeMsg{saved});
+    if (a.notice != "New board. First reveal is safe. Good luck!") t.Fatal("Save timers must preserve replacement notices");
+}
+
+func TestBoardIdentity(t *testing.T) {
+    first := newGame(0);
+    copy := first;
+    copy.seconds = 100;
+    copy.flag(4);
+    if (!sameBoard(&first, &copy)) t.Fatal("Progress changes must keep the same board identity");
+    other := first;
+    other.boardID = first.boardID+"-different";
+    if (sameBoard(&first, &other)) t.Fatal("Separate boards at the same difficulty must differ");
+    first.boardID = ""; copy.boardID = "";
+    if (!sameBoard(&first, &copy)) t.Fatal("Legacy board comparison must ignore progress");
+}
+func TestOverwriteDialogCancelAndSkip(t *testing.T) {
+    a := App{game:newGame(0),active:true,width:80,height:24,overwrite:true,saveDestination:"menu",dialogChoice:3};
+    a.Update(tui.KeyMsg{Key:"esc"});
+    if (a.overwrite || a.menu) t.Fatal("Cancel must keep playing");
+    a.overwrite = true;
+    a.Update(tui.KeyMsg{Key:"enter"});
+    if (a.overwrite || a.menu) t.Fatal("Cancel choice must keep playing");
+    a.overwrite = true;
+    a.game.seeded = true;
+    before := a.game.seconds;
+    a.Update(pulse{});
+    if (a.game.seconds != before) t.Fatal("Dialog must pause the game clock");
+    cursor := a.game.cursor;
+    a.Update(tui.MouseMsg{X:6,Y:6,Button:"left",Action:"press"});
+    if (a.game.cursor != cursor || !a.overwrite) t.Fatal("Dialog must block clicks on the board");
+    a.Update(tui.MouseMsg{X:a.dialogLeft()+3,Y:a.dialogTop()+7,Button:"left",Action:"press"});
+    if (a.overwrite || !a.menu) t.Fatal("Exit without saving must open the menu");
+}
+
+func TestFilenameClippingAndEditing(t *testing.T) {
+    a := App{game:newGame(0),active:true,width:64,height:24};
+    a.openFilename("save","save");
+    a.popupKey(tui.KeyMsg{Key:"ctrl+u"});
+    for (i := 0; i < 100; i++) a.popupKey(tui.KeyMsg{Key:"rune",Text:"a"});
+    a.popupKey(tui.KeyMsg{Key:"rune",Text:"界"});
+    a.popupKey(tui.KeyMsg{Key:"backspace"});
+    if (len(a.filename) != 100) t.Fatal("Backspace must remove one entire UTF-8 scalar");
+    a.filename += "-end.save";
+    content := a.dialogContent(4);
+    if (textCells(content) > a.dialogWidth()-2) t.Fatal("Long filename must stay inside the entry box");
+    clipped := clipText(a.filename,20,true);
+    if (clipped != "<aaaaaaaaaa-end.save") t.Fatal("Filename entry must preserve its visible tail");
+    wide := clipText("界界界-end.save",12,true);
+    if (textCells(wide) > 12) t.Fatal("Wide glyphs must respect the entry box's cell width");
+    if (displaySafe("bad\x1b[31m\nname") != "bad?[31m?name") t.Fatal("Filename control bytes must be harmless in the view");
+    a.popupKey(tui.KeyMsg{Key:"ctrl+u"});
+    a.popupKey(tui.KeyMsg{Key:"enter"});
+    if (a.popup != "save" || a.popupError == "") t.Fatal("Empty filenames must show an entry error");
+    a.popupKey(tui.KeyMsg{Key:"esc"});
+    if (a.popup != "" || a.menu) t.Fatal("Cancel must return to the current game");
+}
+func TestSaveAsAndPickerNavigation(t *testing.T) {
+    a := App{game:newGame(0),active:true,width:80,height:24,overwrite:true,saveDestination:"menu",dialogChoice:1};
+    a.dialogSelect();
+    if (a.popup != "save" || a.saveDestination != "menu") t.Fatal("Save as must preserve the pending menu destination");
+    a.popupKey(tui.KeyMsg{Key:"esc"});
+    if (a.popup != "" || !a.overwrite || a.menu) t.Fatal("Cancelling filename entry must return to the overwrite dialog");
+    a.overwrite = false; a.popup = "picker";
+    for (i := 0; i < 40; i++) a.files.append("fixture.save");
+    a.popupKey(tui.KeyMsg{Key:"end"});
+    if (a.fileChoice != 41 || a.fileOffset == 0) t.Fatal("File picker must scroll to its last option");
+    a.popupKey(tui.KeyMsg{Key:"home"});
+    a.popupKey(tui.KeyMsg{Key:"enter"});
+    if (a.popup != "load") t.Fatal("Custom filename option must open a load entry");
+    a.popupKey(tui.KeyMsg{Key:"esc"});
+    if (a.popup != "picker") t.Fatal("Cancelling custom load must return to the file picker");
+}
+
+func TestPopupPreservesUnicodeBackground(t *testing.T) {
+    if (sliceCells(" · ⚑ ",0,5) != " · ⚑ ") t.Fatal("Popup background must preserve board glyphs");
+    if (sliceCells("a界b",2,4) != " b") t.Fatal("Popup edges must not split wide characters");
+    if (sliceCells("a界b",0,2) != "a ") t.Fatal("Partial wide glyphs must leave correctly sized spaces");
+    a := App{width:80,height:24,overwrite:true,saveDestination:"save"};
+    view := a.dialogView(" · ⚑ ");
+    dots := false; flags := false;
+    for (i := 0; i < len(view); i++) {
+        if (i+len("·") <= len(view) && view[i:i+len("·")] == "·") dots = true;
+        if (i+len("⚑") <= len(view) && view[i:i+len("⚑")] == "⚑") flags = true;
+    }
+    if (!dots || !flags) t.Fatal("Opening a popup must preserve visible dots and flags");
+}

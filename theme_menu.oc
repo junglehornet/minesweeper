@@ -1,0 +1,96 @@
+package main;
+
+import "term/tui";
+import "io";
+
+func lowerText(text string) string {
+    bytes := text -> []i8;
+    for (i := 0; i < len(bytes); i++) if (bytes[i] >= 'A' && bytes[i] <= 'Z') bytes[i] += 32;
+    return bytes -> string;
+}
+func containsText(text string, query string) bool {
+    for (i := 0; i+len(query) <= len(text); i++) if (text[i:i+len(query)] == query) return true;
+    return false;
+}
+func (a *App) filterThemes() {
+    a.themeMatches = {}; a.themeChoice = 0; a.themeOffset = 0;
+    query := lowerText(a.themeFilter);
+    for (i, theme := range a.themes) if (containsText(lowerText(theme.name),query) || containsText(lowerText(theme.id),query)) a.themeMatches.append(i);
+}
+func (a *App) openThemes() {
+    a.popup = "themes"; a.themeFilter = "";
+    themes, issue := loadThemes(configDirectory());
+    a.themes = themes; a.popupError = issue;
+    a.filterThemes();
+    for (i, index := range a.themeMatches) if (a.themes[index].id == currentTheme.id) a.themeChoice = i;
+    a.scrollThemes();
+}
+func (a *App) themeRows() int { return a.dialogHeight()-8; }
+func (a *App) scrollThemes() {
+    if (a.themeChoice < a.themeOffset) a.themeOffset = a.themeChoice;
+    if (a.themeChoice >= a.themeOffset+a.themeRows()) a.themeOffset = a.themeChoice-a.themeRows()+1;
+}
+func (a *App) chooseTheme() {
+    if (len(a.themeMatches) == 0) return;
+    theme := a.themes[a.themeMatches[a.themeChoice]];
+    saved := savePreferences(theme.id);
+    if (saved.hasError()) { a.popupError = saved.error(); return; }
+    currentTheme = theme; a.popup = "";
+    a.setNotice("Theme set: "+theme.name);
+}
+func (a *App) themeKey(e tui.KeyMsg) {
+    if (e.Alt) return;
+    if (e.Key == "esc") { a.popup = ""; return; }
+    count := len(a.themeMatches);
+    if (e.Key == "tab" || e.Key == "down") {
+        if (count > 0) a.themeChoice = (a.themeChoice+1)%count;
+    } else if (e.Key == "shift+tab" || e.Key == "up") {
+        if (count > 0) a.themeChoice = (a.themeChoice+count-1)%count;
+    } else if (e.Key == "enter") a.chooseTheme();
+    else if (e.Key == "ctrl+u") { a.themeFilter = ""; a.filterThemes(); }
+    else if (e.Key == "backspace" && len(a.themeFilter) > 0) {
+        end := len(a.themeFilter)-1;
+        for (end > 0 && ((a.themeFilter[end] -> u8) & 192) == 128) end--;
+        a.themeFilter = a.themeFilter[:end]; a.filterThemes();
+    } else if ((e.Key == "rune" || e.Key == "space") && len(a.themeFilter)+len(e.Text) <= 256) {
+        a.themeFilter += e.Text; a.filterThemes();
+    }
+    a.scrollThemes();
+}
+func (a *App) themeMouse(e tui.MouseMsg) {
+    if (e.Action == "scroll" && len(a.themeMatches) > 0) {
+        if (e.Button == "up") a.themeChoice = (a.themeChoice+len(a.themeMatches)-1)%len(a.themeMatches);
+        if (e.Button == "down") a.themeChoice = (a.themeChoice+1)%len(a.themeMatches);
+        a.scrollThemes(); return;
+    }
+    if (e.Action != "press" || e.Button != "left") return;
+    x := e.X-a.dialogLeft(); row := e.Y-a.dialogTop();
+    if (x <= 0 || x >= a.dialogWidth()-1) return;
+    if (row == a.dialogHeight()-2) { a.popup = ""; return; }
+    index := a.themeOffset+row-6;
+    if (row >= 6 && row < 6+a.themeRows() && index >= 0 && index < len(a.themeMatches)) { a.themeChoice = index; a.chooseTheme(); }
+}
+func (a *App) themeContent(row int) string {
+    width := a.dialogWidth()-2;
+    if (row == 1) return " Themes";
+    if (row == 3) return " Filter ["+padded(clipText(a.themeFilter,width-12,true)+"_",width-11)+"]";
+    if (row == 4) return " "+(a.popupError == "" ? "Tab / Shift+Tab: select   Enter: apply" : a.popupError);
+    if (row == 6 && len(a.themeMatches) == 0) return " No matching themes.";
+    if (row >= 6 && row < 6+a.themeRows()) {
+        index := a.themeOffset+row-6;
+        if (index >= len(a.themeMatches)) return "";
+        theme := a.themes[a.themeMatches[index]];
+        return (index == a.themeChoice ? " > " : "   ")+theme.name+(theme.id == currentTheme.id ? " (current)" : "");
+    }
+    if (row == a.dialogHeight()-2) return " [ Cancel / Esc ]   "+io.Sprint(len(a.themeMatches))+" matching";
+    return "";
+}
+func (a *App) settingsKey(e tui.KeyMsg) {
+    if (e.Key == "esc" || e.Text == "m") { a.settings = false; return; }
+    if (e.Text == "t") { a.openThemes(); return; }
+    if (e.Key == "up" || e.Key == "down" || e.Key == "tab" || e.Key == "shift+tab") a.settingsChoice = 1-a.settingsChoice;
+    if (e.Key == "enter" || e.Key == "space") {
+        if (a.settingsChoice == 0) a.openThemes();
+        else a.settings = false;
+    }
+}
