@@ -2,8 +2,6 @@ package main;
 
 import "term/tui";
 
-// Linux libc directory entries contain a type byte at offset 18 and a
-// NUL-terminated filename at offset 19. No shell or external utility is used.
 extern *void opendir(buffer<i8> path);
 extern buffer<i8> readdir(*void directory);
 extern i32 closedir(*void directory);
@@ -12,13 +10,27 @@ func directoryFilesAt(folder string) Result<[]string> {
     path := (folder+"\0") -> []i8;
     directory := extern.opendir(path.data);
     if ((directory -> int) == 0) return Result<[]string>.error("Cannot list files. You can still type a path.");
+    // Offsets of d_type and d_name in the struct returned by libc readdir.
+    typeOffset := 18; nameOffset := 19; // Linux
+    asm aarch64/macos {
+        mov x0, #20
+        str x0, ${typeOffset}
+        mov x0, #21
+        str x0, ${nameOffset}
+    }
+    // The unsuffixed readdir symbol on Intel macOS uses the legacy layout.
+    asm x86_64/macos {
+        mov qword ptr ${typeOffset}, 6
+        mov qword ptr ${nameOffset}, 8
+    }
     names := []string{};
     for (;;) {
         entry := extern.readdir(directory);
         if ((entry -> int) == 0) break;
-        if (entry[18] != 8 && entry[18] != 10 && entry[18] != 0) continue; // Regular files and symlinks.
+        kind := entry[typeOffset];
+        if (kind != 8 && kind != 10 && kind != 0) continue; // Regular files and symlinks.
         bytes := []i8{};
-        for (i := 19; entry[i] != 0; i++) bytes.append(entry[i]);
+        for (i := nameOffset; entry[i] != 0; i++) bytes.append(entry[i]);
         names.append(bytes -> string);
     }
     extern.closedir(directory);
