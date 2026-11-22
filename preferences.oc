@@ -13,8 +13,13 @@ extern buffer<i8> getenv(buffer<i8> name);
 extern i32 mkdir(buffer<i8> path, u32 mode);
 extern i32 rename(buffer<i8> oldPath, buffer<i8> newPath);
 extern i32 unlink(buffer<i8> path);
+extern i32 access(buffer<i8> path, i32 mode);
 
 func environment(name string) string {
+    if (isWindows()) {
+        value := os.WindowsLookupEnv(name);
+        return value.hasError() ? "" : value.unwrap();
+    }
     key := (name+"\0") -> []i8;
     raw := extern.getenv(key.data);
     if ((raw -> int) == 0) return "";
@@ -29,28 +34,66 @@ func configDirectory() string {
     return home == "" ? "" : home+"/.config/minesweeper";
 }
 func directoryExists(path string) bool {
+    if (isWindows()) {
+        info := os.WindowsStat(path);
+        return !info.hasError() && info.unwrap().Directory;
+    }
     name := (path+"\0") -> []i8;
     handle := extern.opendir(name.data);
     if ((handle -> int) == 0) return false;
     extern.closedir(handle); return true;
 }
+func pathPresent(path string) bool {
+    if (path == "") return false;
+    if (isWindows()) {
+        info := os.WindowsStat(path);
+        return info.hasError() || info.unwrap().Exists;
+    }
+    name := (path+"\0") -> []i8;
+    return extern.access(name.data,0) == 0;
+}
 func createDirectories(path string) bool {
     if (path == "") return false;
-    for (i := 1; i <= len(path); i++) if (i == len(path) || path[i] == '/') {
+    path = normalizePath(path);
+    start := 1;
+    if (isWindows() && len(path) > 2 && path[:2] == "//") {
+        start = 2;
+        if (len(path) >= 8 && lowerText(path[:8]) == "//?/unc/") start = 8;
+        // A UNC server and share already exist. Start after both components.
+        for (part := 0; part < 2; part++) {
+            for (start < len(path) && path[start] != '/') start++;
+            start++;
+        }
+    } else if (isWindows() && len(path) > 2 && path[1] == ':') start = 3;
+    for (i := start; i <= len(path); i++) if (i == len(path) || path[i] == '/') {
         part := path[:i];
         if (part == "" || directoryExists(part)) continue;
-        name := (part+"\0") -> []i8;
-        if (extern.mkdir(name.data,448) != 0 && !directoryExists(part)) return false;
+        if (isWindows()) {
+            if (os.WindowsMkdir(part).hasError() && !directoryExists(part)) return false;
+        } else {
+            name := (part+"\0") -> []i8;
+            if (extern.mkdir(name.data,448) != 0 && !directoryExists(part)) return false;
+        }
     }
     return directoryExists(path);
 }
+func replaceFile(from string, to string) bool {
+    if (isWindows()) return !os.WindowsRename(from,to).hasError();
+    oldName := (from+"\0") -> []i8; newName := (to+"\0") -> []i8;
+    return extern.rename(oldName.data,newName.data) == 0;
+}
+func removeFile(path string) bool {
+    if (isWindows()) return !directoryExists(path) && !os.WindowsRemove(path).hasError();
+    name := (path+"\0") -> []i8;
+    return extern.unlink(name.data) == 0;
+}
 func fileExists(path string) bool {
-    opened := os.Open(path,os.FileMode.Read);
+    opened := os.Open(nativeFilePath(path),os.FileMode.Read);
     if (opened.hasError()) return false;
     opened.unwrap().Close(); return true;
 }
 func readText(path string, limit int) Result<string> {
-    opened := os.Open(path,os.FileMode.Read);
+    opened := os.Open(nativeFilePath(path),os.FileMode.Read);
     if (opened.hasError()) return Result<string>.error("Cannot open "+path);
     file := opened.unwrap(); defer file.Close();
     size := file.Size();
@@ -60,7 +103,7 @@ func readText(path string, limit int) Result<string> {
     return Result<string>.value(bytes.unwrap() -> string);
 }
 func writeText(path string, text string) Result<bool> {
-    opened := os.Open(path,os.FileMode.Write);
+    opened := os.Open(nativeFilePath(path),os.FileMode.Write);
     if (opened.hasError()) return Result<bool>.error("Cannot write "+path);
     file := opened.unwrap(); defer file.Close();
     written := file.Write(text);
@@ -76,9 +119,8 @@ func savePreferences(id string) Result<bool> {
     temporary := path+".tmp."+io.Sprint(time.Monotonic());
     written := writeText(temporary,encoded.unwrap()+"\n");
     if (written.hasError()) return written;
-    oldName := (temporary+"\0") -> []i8; newName := (path+"\0") -> []i8;
-    if (extern.rename(oldName.data,newName.data) != 0) {
-        extern.unlink(oldName.data);
+    if (!replaceFile(temporary,path)) {
+        removeFile(temporary);
         return Result<bool>.error("Cannot replace settings.json.");
     }
     return Result<bool>.value(true);

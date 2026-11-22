@@ -82,18 +82,16 @@ func (g *Game) encode() string {
     text += "BOARD_ID\n"+g.boardID+"\n";
     return text;
 }
-func saveGame(g *Game) Result<bool> { return saveGameTo(g, "minesweeper.save"); }
 func saveGameTo(g *Game, path string) Result<bool> {
-    file := os.Open(path, os.FileMode.Write);
+    file := os.Open(nativeFilePath(path), os.FileMode.Write);
     if (file == Result<os.File>.error) return Result<bool>.error(file.(Result<os.File>.error));
     f := file.unwrap(); defer f.Close();
     result := f.Write(g.encode());
     if (result == Result<int>.error) return Result<bool>.error(result.(Result<int>.error));
     return Result<bool>.value(true);
 }
-func loadGame() Result<Game> { return loadGameFrom("minesweeper.save"); }
 func loadGameFrom(path string) Result<Game> {
-    opened := os.Open(path, os.FileMode.Read);
+    opened := os.Open(nativeFilePath(path), os.FileMode.Read);
     if (opened == Result<os.File>.error) return Result<Game>.error("No saved game found.");
     f := opened.unwrap(); defer f.Close();
     size := f.Size();
@@ -153,11 +151,8 @@ func sameBoard(first *Game, second *Game) bool {
     for (i := 0; i < len(first.cells); i++) if (first.cells[i] != second.cells[i]) return false;
     return true;
 }
-func differentSavedBoard(g *Game) bool { return differentBoardAt(g, "minesweeper.save"); }
 func differentBoardAt(g *Game, path string) bool {
-    opened := os.Open(path, os.FileMode.Read);
-    if (opened == Result<os.File>.error) return false;
-    opened.unwrap().Close();
+    if (!pathPresent(path)) return false;
     saved := loadGameFrom(path);
     // Protect existing files even if their contents cannot be loaded.
     if (saved == Result<Game>.error) return true;

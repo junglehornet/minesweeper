@@ -80,27 +80,37 @@ func (a *App) dialogLabels() []string {
     if (a.saveDestination == "save") return []string{"Overwrite", "Save as...", "Cancel"};
     return []string{"Overwrite", "Save as...", "Exit without saving", "Cancel"};
 }
+pickerDeleteLabel := " [Delete]";
 func (a *App) dialogContent(row int) string {
     width := a.dialogWidth()-2;
     if (a.popup == "themes") return a.themeContent(row);
+    if (a.popup == "delete") {
+        if (row == 1) return " Delete this file?";
+        if (row == 3) return " "+clipText(a.deletePath,width-1,true);
+        if (row == 7) return (a.deleteSelected ? " >" : "  ")+"[ Delete ]"+(a.deleteSelected ? "   " : "  >")+"[ Cancel ]";
+        if (row == 9) return " Tab: focus  Enter: confirm  Esc: cancel";
+        return "";
+    }
     if (a.popup == "picker") {
         if (row == 1) return " Resume from other game";
-        if (row == 2) return " "+(a.popupError == "" ? "Files in the current directory" : a.popupError);
+        if (row == 2) return " "+(a.popupError == "" ? "Files in the user save directory" : a.popupError);
         if (row >= 4 && row < 4+a.pickerRows()) {
             index := a.fileOffset+row-4;
             if (index >= len(a.files)+2) return "";
             label := index == 0 ? "Type custom filename..." : (index == len(a.files)+1 ? "Cancel" : a.files[index-1]);
-            return (index == a.fileChoice ? " > " : "   ")+label;
+            entry := (index == a.fileChoice ? " > " : "   ")+label;
+            if (index > 0 && index <= len(a.files) && a.dialogWidth() >= 20) return padded(entry,width-len(pickerDeleteLabel))+pickerDeleteLabel;
+            return entry;
         }
-        if (row == a.dialogHeight()-2) return " Up/Down / PgUp/PgDn / Enter / Esc";
+        if (row == a.dialogHeight()-2) return " Enter: open  Del: delete  Esc: close";
         return "";
     }
     if (a.popup != "") {
         if (row == 1) return a.popup == "save" ? " Save as..." : " Resume from filename";
-        if (row == 2) return " Filename (relative or absolute path):";
+        if (row == 2) return " Filename or path (./ for launch directory):";
         if (row == 4) return " ["+entryView(a.filename,a.filenameCursor,width-5)+"] ";
         if (row == 5) return " "+a.popupError;
-        if (row == 7) return (a.entryChoice == 1 ? " >" : "  ")+(a.popup == "save" ? "[ Save ]" : "[ Open ]")+(a.entryChoice == 2 ? "  >" : "   ")+"[ Cancel ]";
+        if (row == 7) return (a.entryChoice == 1 ? " >" : "  ")+(a.popup == "save" ? "[ Save ]" : "[ Open ]")+(a.entryChoice == 2 ? "  >" : "   ")+"[ Cancel ]"+(a.entryChoice == 3 ? "  >" : "   ")+"[ Delete ]";
         if (row == 9) return " Enter: submit  Tab: focus  Esc: cancel";
         if (row == 10) return " Left/Right/Home/End: move  Del: erase";
         return "";

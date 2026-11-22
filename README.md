@@ -1,12 +1,12 @@
 # Ocean Minesweeper
 
-A native Linux Minesweeper TUI written in [Ocean](https://github.com/ocean-foundation/ocean-c), using its built-in `term/tui` library. Play with the keyboard, the mouse, or both.
+A terminal Minesweeper game written in [Ocean](https://ocean-lang.dev), using its built-in `term/tui` library. Play with the keyboard, the mouse, or both.
 
 Features include three difficulties, safe first reveals, automatic empty-area reveals, chording, save/resume with custom filenames, and searchable TOML themes.
 
 ## Build and run
 
-Use a recent Ocean compiler with its matching standard library, including `term/tui` mouse support and the incremental renderer.
+Use a recent Ocean compiler with a standard library that includes `os.OS()`, `os.Arch()`, `os.WindowsKnownFolder()`, and the Windows filesystem APIs, along with `term/tui` mouse support and the incremental renderer. Set `OCEAN_SRC` to the absolute path of a matching source checkout when using a local standard library.
 
 ```sh
 ocean check .
@@ -14,7 +14,7 @@ ocean build . -o minesweeper
 ./minesweeper
 ```
 
-Alternatively, run `ocean run .`. Use an interactive terminal with true-color ANSI support and xterm-compatible mouse reporting. A window of at least 64 columns and 24 rows is recommended; smaller windows show a scrollable portion of the board. Expert fits in full at 96 columns and 28 rows.
+Alternatively, run `ocean run .`. Use an interactive terminal with true-color ANSI support and xterm-compatible mouse reporting. On Windows, use a terminal with virtual terminal input support. A window of at least 64 columns and 24 rows is recommended; smaller windows show a scrollable portion of the board. Expert fits in full at 96 columns and 28 rows.
 
 ## Install themes and settings
 
@@ -111,13 +111,23 @@ Reset clears reveals and flags, resets the timer and selection, and creates a fr
 
 ## Save and resume
 
-Save initially writes `minesweeper.save` in the working directory, preserving the board, flags, reveals, selection, and elapsed time. The save confirmation disappears after 900 ms. Completed games cannot be saved.
+Save initially writes `minesweeper.save` in your user save folder, preserving the board, flags, reveals, selection, and elapsed time. The folder is created on the first save. The save confirmation disappears after 900 ms. Completed games cannot be saved.
 
-**Save as** opens a filename entry for relative or absolute paths. Enter submits, Left/Right and Home/End move the cursor, and clicking inside the field positions it. Typing inserts at the cursor; Backspace erases before it and Delete erases after it. Ctrl+U clears, Tab changes focus between the field and buttons, and Escape cancels. Long filenames scroll within the field, preserving the popup border and keeping the cursor visible. A successful save under a new name makes that path the current game's save target.
+| Platform | User save folder |
+| --- | --- |
+| Linux and other XDG systems | `$XDG_DATA_HOME/minesweeper/saves/`, defaulting to `~/.local/share/minesweeper/saves/` |
+| macOS | `~/Library/Application Support/Minesweeper/saves/` |
+| Windows | `JungleHornet\Minesweeper` under the Saved Games known folder, usually `%USERPROFILE%\Saved Games` |
+
+Set `MINESWEEPER_SAVE_DIR` to an absolute path to override the folder. If the user-wide `minesweeper.save` is missing, **Resume** tries the old default file in the working directory. The next save writes to the user folder and the original file stays in place.
+
+**Save as** opens a filename entry. A bare name such as `weekend.save` goes in the user save folder. Explicit relative paths such as `./weekend.save` or `old/weekend.save` resolve from the working directory, and absolute paths work as entered. Enter submits, Left/Right and Home/End move the cursor, and clicking inside the field positions it. Typing inserts at the cursor; Backspace erases before it and Delete erases after it. Ctrl+U clears, Tab changes focus between the field and buttons, and Escape cancels. Long filenames scroll within the field, preserving the popup border and keeping the cursor visible. A successful save under a new name makes that path the current game's save target.
 
 Updating the same board's save proceeds immediately. Saving over a different board opens a centered dialog with **Overwrite**, **Save as**, and **Cancel**. Menu and quit requests also offer **Exit without saving**. Cancel returns to the game without saving or leaving it. The game timer pauses while the dialog is open. Popups zoom from the center when opening and shrink back when closing, with the fill extending through their rounded border cells. Switching between screens within one popup is immediate.
 
-The last main-menu option, **Resume from other game**, opens a scrollable picker of files in the current directory. It includes hidden files and does not filter by save extension. Use arrows, Page Up/Down, Home/End, the mouse wheel, or click a file. The first option lets you type a path in another directory. Invalid saves show an error and leave the picker open. Loading a file makes it the game's save target.
+The last main-menu option, **Resume from other game**, opens a scrollable picker of files in the user save folder. It includes hidden files and does not filter by save extension. Use arrows, Page Up/Down, Home/End, the mouse wheel, or click a file. The first option lets you type a filename or an explicit path. Invalid saves show an error and leave the picker open. Loading a file makes it the game's save target.
+
+To delete a save, choose **Delete** beside it in the picker or highlight it and press **Delete**. In **Save as** or the custom filename dialog, enter the filename or path, then choose the **Delete** button. The confirmation shows the file path and starts with **Cancel** selected. Choose **Delete** in the confirmation to remove the file.
 
 ## Verify
 

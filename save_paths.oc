@@ -1,0 +1,73 @@
+package main;
+
+import "os";
+
+defaultSaveName := "minesweeper.save";
+
+func isWindows() bool { return os.OS() == "windows"; }
+
+func saveDirectory() string {
+    override := environment("MINESWEEPER_SAVE_DIR");
+    if (absolutePath(override)) return normalizePath(override);
+    if (isWindows()) {
+        folder := os.WindowsKnownFolder("4C5C32FF-BB9D-43B0-B5B4-2D72E54EAAA4"); // FOLDERID_SavedGames
+        return folder.hasError() ? "" : namedSavePath(normalizePath(folder.unwrap()), "JungleHornet/Minesweeper");
+    }
+    home := environment("HOME");
+    if (os.OS() == "macos") return absolutePath(home) ? namedSavePath(home, "Library/Application Support/Minesweeper/saves") : "";
+    data := environment("XDG_DATA_HOME");
+    if (absolutePath(data)) return namedSavePath(data, "minesweeper/saves");
+    return absolutePath(home) ? namedSavePath(home, ".local/share/minesweeper/saves") : "";
+}
+
+func normalizePath(path string) string {
+    if (!isWindows()) return path;
+    bytes := path -> []i8;
+    for (i := 0; i < len(bytes); i++) if (bytes[i] == 92) bytes[i] = '/';
+    return bytes -> string;
+}
+
+func absolutePath(path string) bool {
+    path = normalizePath(path);
+    if (!isWindows()) return len(path) > 0 && path[0] == '/';
+    return (len(path) > 2 && path[1] == ':' && path[2] == '/') ||
+           (len(path) > 2 && path[:2] == "//");
+}
+
+func namedSavePath(folder string, name string) string {
+    return folder == "" ? "" : folder+(folder[len(folder)-1] == '/' ? "" : "/")+name;
+}
+
+func nativeFilePath(path string) string {
+    if (!isWindows()) return path;
+    bytes := path -> []i8;
+    for (i := 0; i < len(bytes); i++) if (bytes[i] == '/') bytes[i] = 92;
+    return bytes -> string;
+}
+
+func (a *App) filenamePath(name string) string {
+    path := normalizePath(name);
+    if (path == "." || path == "..") return "";
+    if (isWindows() && len(path) > 1 && path[1] == ':') return name;
+    for (i := 0; i < len(path); i++) if (path[i] == '/') return name;
+    return namedSavePath(a.saveDirectory, path);
+}
+
+func (a *App) saveName(path string) string {
+    prefix := namedSavePath(a.saveDirectory, "");
+    if (prefix != "" && len(path) > len(prefix) && path[:len(prefix)] == prefix) {
+        name := path[len(prefix):];
+        if (a.filenamePath(name) == path) return name;
+    }
+    return path;
+}
+
+func (a *App) resumeDefault() {
+    path := namedSavePath(a.saveDirectory, defaultSaveName);
+    if (path != "" && pathPresent(path)) {
+        if (!a.resumePath(path)) a.setNotice(a.popupError);
+        return;
+    }
+    if (a.resumePath(defaultSaveName)) a.savePath = "";
+    else a.setNotice(a.popupError);
+}

@@ -15,8 +15,10 @@ struct App {
     overwrite bool;
     saveDestination string;
     dialogChoice int;
-    savePath, pendingPath string;
+    saveDirectory, savePath, pendingPath string;
     popup, filename, popupError string;
+    deletePath, deleteFrom string;
+    deleteSelected bool;
     entryChoice int;
     filenameCursor, themeCursor int;
     files []string;
@@ -44,17 +46,21 @@ func (a *App) Init() tui.Cmd { return tui.Tick(time.Second, pulse{}); }
 func (a *App) store() bool {
     if (!a.active || a.game.lost || a.game.won) { a.setNotice("No unfinished game to save."); return false; }
     path := a.pendingPath == "" ? a.currentPath() : a.pendingPath;
+    if (path == "") { a.setNotice("Save failed: Cannot locate the user save directory. Use Save as with an explicit path."); return false; }
+    if (a.saveName(path) != path && !createDirectories(a.saveDirectory)) {
+        a.setNotice("Save failed: Cannot create "+a.saveDirectory); return false;
+    }
     result := saveGameTo(&a.game, path);
     if (result == Result<bool>.error) { a.setNotice("Save failed: "+result.(Result<bool>.error)); return false; }
     a.savePath = path;
-    a.setNotice("Saved to "+path); return true;
+    a.setNotice("Saved to "+a.saveName(path)); return true;
 }
 // Return true only when the requested destination is process exit.
 func (a *App) finishSave(destination string) bool {
     if (destination == "menu") { a.menu = true; a.choice = 3; }
     return destination == "quit";
 }
-func (a *App) currentPath() string { return a.savePath == "" ? "minesweeper.save" : a.savePath; }
+func (a *App) currentPath() string { return a.savePath == "" ? namedSavePath(a.saveDirectory, defaultSaveName) : a.savePath; }
 func (a *App) requestSave(destination string) bool { return a.requestSaveTo(destination, a.currentPath()); }
 func (a *App) requestSaveTo(destination string, path string) bool {
     a.pendingPath = path;
@@ -98,7 +104,7 @@ func (a *App) select() bool {
     if (a.choice == 3) {
         if (a.active && !a.game.lost && !a.game.won) { a.menu = false; a.setNotice("Game resumed."); }
         else {
-            if (!a.resumePath("minesweeper.save")) a.setNotice(a.popupError);
+            a.resumeDefault();
         }
     }
     if (a.choice == 4) { a.settings = true; a.settingsChoice = 0; }
@@ -281,7 +287,7 @@ func main() int {
         }
         io.Printfln("Unknown option: {}",args[i]).unwrap(); return 1;
     }
-    app := App{menu:true,width:80,height:24,notice:"Welcome. Choose a difficulty or resume a saved game."};
+    app := App{menu:true,width:80,height:24,saveDirectory:saveDirectory(),notice:"Welcome. Choose a difficulty or resume a saved game."};
     app.loadPreferences();
     program := tui.NewProgram(&app,tui.Options{AltScreen:true,Mouse:true});
     result := program.Run();
