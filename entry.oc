@@ -1,0 +1,79 @@
+package main;
+
+import "term/tui";
+
+// Positions are byte offsets at UTF-8 scalar boundaries, never inside a glyph.
+func entryPosition(text string, cursor int) int {
+    if (cursor < 0) return 0;
+    if (cursor > len(text)) return len(text);
+    for (cursor > 0 && cursor < len(text) && ((text[cursor] -> u8) & 192) == 128) cursor--;
+    return cursor;
+}
+func entryPrevious(text string, cursor int) int {
+    if (cursor <= 0) return 0;
+    cursor--;
+    for (cursor > 0 && ((text[cursor] -> u8) & 192) == 128) cursor--;
+    return cursor;
+}
+// Return true only when the text changes: moving the caret must not reset a
+// theme list's selection or clear a filename validation error.
+func editEntry(text *string, cursor *int, key tui.KeyMsg, limit int) bool {
+    before := *text; value := before;
+    position := entryPosition(value,*cursor);
+    if (key.Key == "left") position = entryPrevious(value,position);
+    else if (key.Key == "right") { if (position < len(value)) position += glyphSize(value,position); }
+    else if (key.Key == "home" || key.Key == "ctrl+a") position = 0;
+    else if (key.Key == "end" || key.Key == "ctrl+e") position = len(value);
+    else if (key.Key == "ctrl+u") { value = ""; position = 0; }
+    else if (key.Key == "backspace" && position > 0) {
+        previous := entryPrevious(value,position);
+        value = value[:previous]+value[position:]; position = previous;
+    } else if (key.Key == "delete" && position < len(value)) {
+        value = value[:position]+value[position+glyphSize(value,position):];
+    } else if ((key.Key == "rune" || key.Key == "space") && len(value)+len(key.Text) <= limit && displaySafe(key.Text) == key.Text) {
+        value = value[:position]+key.Text+value[position:]; position += len(key.Text);
+    }
+    *text = value; *cursor = position;
+    return value != before;
+}
+// Keep the caret visible, showing both sides of it when possible. The returned
+// start and inset describe the visible window for matching mouse hit testing.
+func entryLayout(text string, cursor int, width int) (string, int, int) {
+    if (width <= 0) return "",0,0;
+    cursor = entryPosition(text,cursor);
+    before := displaySafe(text[:cursor]); after := displaySafe(text[cursor:]);
+    decorated := before+"_"+after;
+    total := textCells(decorated); caret := textCells(before);
+    if (total <= width) return padded(decorated,width),0,0;
+    if (width == 1) return "_",caret,0;
+    if (width == 2) return caret > 0 ? "<_" : "_>",caret,caret > 0 ? 1 : 0;
+    window := width-2;
+    start := caret-window/2;
+    if (start < 0) start = 0;
+    if (start > total-window) start = total-window;
+    visible := sliceCells(decorated,start,start+window);
+    return (start > 0 ? "<" : " ")+visible+(start+window < total ? ">" : " "),start,1;
+}
+func entryView(text string, cursor int, width int) string {
+    view, ignoredStart, ignoredInset := entryLayout(text,cursor,width);
+    return view;
+}
+func entryClick(text string, cursor int, width int, column int) int {
+    if (width <= 0) return entryPosition(text,cursor);
+    cursor = entryPosition(text,cursor);
+    ignoredView, start, inset := entryLayout(text,cursor,width);
+    if (column < inset) column = inset;
+    if (column >= width-inset) column = width-inset-1;
+    target := start+column-inset;
+    caret := textCells(displaySafe(text[:cursor]));
+    if (target == caret) return cursor;
+    if (target > caret) target--;
+    position := 0; cells := 0;
+    for (position < len(text)) {
+        size := glyphSize(text,position);
+        widthOfGlyph := textCells(displaySafe(text[position:position+size]));
+        if (target <= cells || (widthOfGlyph > 1 && target < cells+(widthOfGlyph+1)/2)) return position;
+        cells += widthOfGlyph; position += size;
+    }
+    return len(text);
+}

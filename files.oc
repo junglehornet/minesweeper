@@ -53,6 +53,7 @@ func (a *App) openFilename(mode string, destination string) {
     if (mode == "save" && (!a.active || a.game.lost || a.game.won)) { a.setNotice("No unfinished game to save."); return; }
     a.popup = mode; a.saveDestination = destination;
     a.filename = mode == "save" ? (a.overwrite && a.pendingPath != "" ? a.pendingPath : a.currentPath()) : "";
+    a.filenameCursor = len(a.filename);
     a.popupError = ""; a.entryChoice = 0;
 }
 func (a *App) cancelFilename() {
@@ -102,17 +103,7 @@ func (a *App) popupKey(e tui.KeyMsg) bool {
         return a.submitFilename();
     }
     if (a.entryChoice != 0) return false;
-    if (e.Key == "ctrl+u") a.filename = "";
-    else if (e.Key == "backspace" && len(a.filename) > 0) {
-        end := len(a.filename)-1;
-        for (end > 0 && ((a.filename[end] -> u8) & 192) == 128) end--;
-        a.filename = a.filename[:end];
-    } else if ((e.Key == "rune" || e.Key == "space") && len(a.filename)+len(e.Text) <= 4096) {
-        clean := true;
-        for (i := 0; i < len(e.Text); i++) if (e.Text[i] >= 0 && e.Text[i] < 32) clean = false;
-        if (clean) a.filename += e.Text;
-    }
-    a.popupError = "";
+    if (editEntry(&a.filename,&a.filenameCursor,e,4096)) a.popupError = "";
     return false;
 }
 func (a *App) popupMouse(e tui.MouseMsg) bool {
@@ -129,7 +120,10 @@ func (a *App) popupMouse(e tui.MouseMsg) bool {
         index := row-4+a.fileOffset;
         if (row >= 4 && row < 4+a.pickerRows() && index < len(a.files)+2) { a.fileChoice = index; a.pickerSelect(); }
     } else {
-        if (row == 4) a.entryChoice = 0;
+        if (row == 4) {
+            a.entryChoice = 0;
+            a.filenameCursor = entryClick(a.filename,a.filenameCursor,a.dialogWidth()-7,x-3);
+        }
         if (row == 7 && x >= 2 && x < 12) return a.submitFilename();
         if (row == 7 && x >= 13 && x < 25) a.cancelFilename();
     }

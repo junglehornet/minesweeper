@@ -1,0 +1,179 @@
+package main;
+
+import "term/tui";
+import "time";
+
+struct PopupPicture { lines []string; width, height int; border string; }
+struct popupFrameMsg { revision int; }
+func (a *App) popupPresent() bool { return a.overwrite || a.popup != ""; }
+func (a *App) popupTick() tui.Cmd { return tui.Tick(16*time.Millisecond,popupFrameMsg{a.popupRevision}); }
+
+// Detect lifetime boundaries centrally: changing screens inside an existing
+// popup keeps the same lifetime and never starts another zoom.
+func (a *App) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+    switch (event := message.(type)) {
+        case popupFrameMsg:
+            if (!a.popupAnimating || event.revision != a.popupRevision) return a,tui.NoCmd;
+            a.popupProgress += a.popupClosing ? -1 : 1;
+            if ((a.popupClosing && a.popupProgress < 0) || (!a.popupClosing && a.popupProgress >= 8)) {
+                if (a.popupProgress < 0) a.popupProgress = 0;
+                a.popupAnimating = false; a.popupClosing = false; a.popupImage = PopupPicture{};
+                if (a.quitAfterPopup) { a.quitAfterPopup = false; return a,tui.Quit; }
+                return a,tui.NoCmd;
+            }
+            return a,a.popupTick();
+        case tui.MouseMsg:
+            // A click on a disappearing popup must not reach the game below it.
+            if (a.popupAnimating && a.popupClosing && !a.popupPresent()) return a,tui.NoCmd;
+        case tui.KeyMsg:
+            if (event.Key == "ctrl+c") return a,tui.Quit;
+            if (a.quitAfterPopup) return a,tui.NoCmd;
+    }
+    wasOpen := a.popupPresent();
+    oldPicture: PopupPicture;
+    if (wasOpen) switch (event := message.(type)) {
+        case tui.KeyMsg:
+            if (event.Key == "enter" || event.Key == "space" || event.Key == "esc" || event.Text == "c") oldPicture = a.popupPicture();
+        case tui.MouseMsg:
+            if (event.Action == "press") oldPicture = a.popupPicture();
+    }
+    ignored, command := a.handleMessage(message);
+    switch (event := message.(type)) {
+        case tui.WindowSizeMsg:
+            // Complete the transition on resize; old-size animation frames are
+            // invalidated, while the normal renderer redraws at the new size.
+            if (a.popupAnimating) {
+                a.popupRevision++; a.popupAnimating = false; a.popupClosing = false;
+                a.popupImage = PopupPicture{};
+                if (a.quitAfterPopup) { a.quitAfterPopup = false; return a,tui.Quit; }
+            }
+    }
+    nowOpen := a.popupPresent();
+    if (!wasOpen && nowOpen) {
+        if (!a.popupAnimating) a.popupProgress = 0;
+        a.popupRevision++; a.popupAnimating = true; a.popupClosing = false;
+        a.popupImage = PopupPicture{};
+        return a,tui.Batch(command,a.popupTick());
+    }
+    if (wasOpen && !nowOpen) {
+        if (!a.popupAnimating) a.popupProgress = 8;
+        if (a.popupProgress <= 0) a.popupProgress = 1;
+        a.popupRevision++; a.popupAnimating = true; a.popupClosing = true;
+        a.popupImage = oldPicture;
+        if (command == tui.Quit) { a.quitAfterPopup = true; command = tui.NoCmd; }
+        return a,tui.Batch(command,a.popupTick());
+    }
+    if (a.popupAnimating && a.popupClosing && command == tui.Quit) {
+        a.quitAfterPopup = true; return a,tui.NoCmd;
+    }
+    return a,command;
+}
+// Quadratic ease-out opening and the reverse ease-in closing, centered on a
+// single terminal cell. The final geometry matches the normal popup exactly.
+func popupGeometry(width int, height int, progress int, screenWidth int, screenHeight int) (int, int, int, int) {
+    if (width > screenWidth-1) width = screenWidth-1;
+    if (height > screenHeight) height = screenHeight;
+    if (width < 1) width = 1;
+    if (height < 1) height = 1;
+    if (progress < 0) progress = 0;
+    if (progress > 8) progress = 8;
+    eased := progress*(16-progress);
+    width = 1+(width-1)*eased/64;
+    height = 1+(height-1)*eased/64;
+    left := (screenWidth-1-width)/2; top := (screenHeight-height)/2;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    return width,height,left,top;
+}
+// Remove SGR without converting Unicode or repeatedly growing an output array.
+func popupBackground(base string) []string {
+    storage := base -> []i8; source := storage.data;
+    plainStorage: [len(base)+1]i8;
+    plain := plainStorage.data; used := 0; start := 0;
+    lines := []string{};
+    for (i := 0; i < len(base); i++) {
+        if (source[i] == 27) { for (; i < len(base) && source[i] != 109; i++) {} }
+        else if (source[i] == 10) { lines.append(plainStorage[start:used] -> string); start = used; }
+        else { plain[used] = source[i]; used++; }
+    }
+    lines.append(plainStorage[start:used] -> string); return lines;
+}
+// Clip a styled row by terminal columns, preserving the style inherited at the
+// slice's left edge. Wide characters cut by an edge become correctly sized spaces.
+func styledSlice(text string, start int, end int) string {
+    if (end <= start) return "";
+    storage := text -> []i8; source := storage.data;
+    outputStorage: [len(text)+end-start+8]i8;
+    output := outputStorage.data; used := 0; column := 0; filled := 0; keepMarks := false;
+    for (i := 0; i < len(text);) {
+        if (column >= end) break;
+        if (source[i] == 27) {
+            finish := i+1;
+            for (; finish < len(text) && source[finish] != 109; finish++) {}
+            if (finish < len(text)) {
+                for (j := i; j <= finish; j++) { output[used] = source[j]; used++; }
+                i = finish+1; continue;
+            }
+        }
+        first := (source[i] -> u8) -> int;
+        size := first < 128 ? 1 : (first < 224 ? 2 : (first < 240 ? 3 : 4));
+        if (i+size > len(text)) size = 1;
+        scalar := size == 1 ? first : first & (size == 2 ? 31 : (size == 3 ? 15 : 7));
+        for (j := 1; j < size; j++) scalar = scalar*64+((source[i+j] -> u8) -> int & 63);
+        cells := glyphWidth(scalar);
+        if (cells == 0) {
+            if (keepMarks) for (j := 0; j < size; j++) { output[used] = source[i+j]; used++; }
+        } else {
+            keepMarks = column >= start && column+cells <= end;
+            if (keepMarks) {
+                for (j := 0; j < size; j++) { output[used] = source[i+j]; used++; }
+                filled += cells;
+            } else for (c := column; c < column+cells; c++) if (c >= start && c < end) { output[used] = 32; used++; filled++; }
+            column += cells;
+        }
+        i += size;
+    }
+    for (; filled < end-start; filled++) { output[used] = 32; used++; }
+    return outputStorage[:used] -> string;
+}
+func zoomRow(picture PopupPicture, row int, width int, height int) string {
+    if (width == picture.width && height == picture.height) return picture.lines[row];
+    if (height == 1) {
+        line := "";
+        for (i := 0; i < width; i++) line += width == 1 ? "·" : "─";
+        return picture.border+line;
+    }
+    if (width == 1) return picture.border+"│";
+    horizontal := "";
+    for (i := 0; i < width-2; i++) horizontal += "─";
+    if (row == 0) return picture.border+"╭"+horizontal+"╮";
+    if (row == height-1) return picture.border+"╰"+horizontal+"╯";
+    sourceRow := (picture.height-height)/2+row;
+    sourceLeft := (picture.width-width)/2+1;
+    content := sourceRow >= 0 && sourceRow < len(picture.lines) ? styledSlice(picture.lines[sourceRow],sourceLeft,sourceLeft+width-2) : "";
+    return picture.border+"│"+content+picture.border+"│";
+}
+func (a *App) popupOverlay(base string, picture PopupPicture, progress int) string {
+    if (len(picture.lines) == 0 || a.width < 2 || a.height < 1) return base;
+    lines := popupBackground(base);
+    width,height,left,top := popupGeometry(picture.width,picture.height,progress,a.width,a.height);
+    capacity := len(base)*2+(a.width*4+1024)*a.height+8192;
+    outputStorage: [capacity]i8;
+    output := outputStorage.data; used := 0;
+    muted := themeMuted(); reset := "\x1b[0m";
+    for (y := 0; y < a.height; y++) {
+        background := y < len(lines) ? lines[y] : "";
+        appendThemeBuffer(output,&used,muted);
+        if (y >= top && y < top+height) {
+            appendThemeBuffer(output,&used,styledSlice(background,0,left));
+            appendThemeBuffer(output,&used,reset);
+            appendThemeBuffer(output,&used,zoomRow(picture,y-top,width,height));
+            appendThemeBuffer(output,&used,reset);
+            appendThemeBuffer(output,&used,muted);
+            appendThemeBuffer(output,&used,styledSlice(background,left+width,a.width-1));
+        } else appendThemeBuffer(output,&used,styledSlice(background,0,a.width-1));
+        appendThemeBuffer(output,&used,reset);
+        if (y+1 < a.height) { output[used] = 10; used++; }
+    }
+    return outputStorage[:used] -> string;
+}

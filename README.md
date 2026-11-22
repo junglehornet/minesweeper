@@ -54,7 +54,7 @@ Open **Settings → Themes** on the main menu, press **t** from the menu or game
 
 Type into the filter to narrow the list by theme name or filename. Matching is case-insensitive for ASCII letters. **Tab** and **Shift+Tab** cycle through all themes when the filter is empty, or just the matching themes otherwise. Up/Down also work. **Enter** applies the selected theme and atomically saves its filename stem in `settings.json`. **Escape** cancels without changing the current theme or saved preference.
 
-Click a listed theme to apply it, or use the mouse wheel to navigate. Backspace edits the filter and Ctrl+U clears it. Long queries clip at the start so the text stays inside its box. The game timer pauses while a popup is open.
+Click a listed theme to apply it, or use the mouse wheel to navigate. Left/Right and Home/End move the text cursor; click inside the field to position it. Typing inserts at the cursor, Backspace erases before it, Delete erases after it, and Ctrl+U clears the field. Long queries scroll within the box to keep the cursor visible. The game timer pauses while a popup is open.
 
 Bundled themes:
 
@@ -113,9 +113,9 @@ Reset clears reveals and flags, resets the timer and selection, and creates a fr
 
 Save initially writes `minesweeper.save` in the working directory, preserving the board, flags, reveals, selection, and elapsed time. The save confirmation disappears after 900 ms. Completed games cannot be saved.
 
-**Save as** opens a filename entry for relative or absolute paths. Enter submits, Backspace erases, Ctrl+U clears, Tab changes focus between the field and buttons, and Escape cancels. Long filenames clip from the start, preserving their ending and the popup border. A successful save under a new name makes that path the current game's save target.
+**Save as** opens a filename entry for relative or absolute paths. Enter submits, Left/Right and Home/End move the cursor, and clicking inside the field positions it. Typing inserts at the cursor; Backspace erases before it and Delete erases after it. Ctrl+U clears, Tab changes focus between the field and buttons, and Escape cancels. Long filenames scroll within the field, preserving the popup border and keeping the cursor visible. A successful save under a new name makes that path the current game's save target.
 
-Updating the same board's save proceeds immediately. Saving over a different board opens a centered dialog with **Overwrite**, **Save as**, and **Cancel**. Menu and quit requests also offer **Exit without saving**. Cancel returns to the game without saving or leaving it. The game timer pauses while the dialog is open.
+Updating the same board's save proceeds immediately. Saving over a different board opens a centered dialog with **Overwrite**, **Save as**, and **Cancel**. Menu and quit requests also offer **Exit without saving**. Cancel returns to the game without saving or leaving it. The game timer pauses while the dialog is open. Popups zoom from the center when opening and shrink back when closing, with the fill extending through their rounded border cells. Switching between screens within one popup is immediate.
 
 The last main-menu option, **Resume from other game**, opens a scrollable picker of files in the current directory. It includes hidden files and does not filter by save extension. Use arrows, Page Up/Down, Home/End, the mouse wheel, or click a file. The first option lets you type a path in another directory. Invalid saves show an error and leave the picker open. Loading a file makes it the game's save target.
 
@@ -127,6 +127,8 @@ ocean test . --notty
 ocean build . -o minesweeper
 python3 tests/terminal.py
 python3 tests/preferences.py
+python3 tests/entries.py
+python3 tests/popups.py
 python3 tests/redraw.py
 ```
 

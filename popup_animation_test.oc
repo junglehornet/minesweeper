@@ -1,0 +1,82 @@
+package main;
+
+import "testing";
+import "term/tui";
+
+func finishPopupFrames(a *App) tui.Cmd {
+    last := tui.NoCmd;
+    for (i := 0; i < 10 && a.popupAnimating; i++) {
+        ignored, command := a.Update(popupFrameMsg{a.popupRevision}); last = command;
+    }
+    return last;
+}
+func TestPopupLifetimeAnimation(t *testing.T) {
+    a := App{game:newGame(0),active:true,width:80,height:24};
+    a.Update(tui.KeyMsg{Key:"rune",Text:"t"});
+    if (!a.popupAnimating || a.popupClosing || a.popupProgress != 0) t.Fatal("A new popup must start growing from a point");
+    firstRevision := a.popupRevision;
+    a.Update(popupFrameMsg{firstRevision});
+    if (a.popupProgress != 1) t.Fatal("An animation frame must advance the zoom");
+    a.Update(tui.KeyMsg{Key:"rune",Text:"o"});
+    if (a.themeFilter != "o" || a.popupRevision != firstRevision) t.Fatal("Typing must remain responsive without restarting the animation");
+    finishPopupFrames(&a);
+    if (a.popupAnimating || a.popupProgress != 8) t.Fatal("Opening must finish at the normal popup size");
+    a.Update(tui.KeyMsg{Key:"esc"});
+    if (a.popupPresent() || !a.popupAnimating || !a.popupClosing || len(a.popupImage.lines) == 0 || a.popupImage.height != 18) t.Fatal("Closing must retain the old popup and its geometry for the shrinking image");
+    cursor := a.game.cursor;
+    a.Update(tui.MouseMsg{X:6,Y:6,Button:"left",Action:"press"});
+    if (a.game.cursor != cursor || a.game.seeded) t.Fatal("Closing popups must block clicks reaching the board");
+    a.Update(popupFrameMsg{firstRevision});
+    if (a.popupProgress != 8) t.Fatal("Stale timer messages must not change a newer animation");
+    for (i := 0; i < 8; i++) a.Update(popupFrameMsg{a.popupRevision});
+    if (!a.popupAnimating || a.popupProgress != 0) t.Fatal("Closing must display its final point before disappearing");
+    finishPopupFrames(&a);
+    if (a.popupAnimating || a.popupClosing || a.popupProgress != 0 || len(a.popupImage.lines) != 0) t.Fatal("Closing must finish with no retained popup image");
+}
+func TestPopupInternalNavigationDoesNotZoom(t *testing.T) {
+    a := App{width:80,height:24,popup:"picker",popupProgress:8};
+    a.Update(tui.KeyMsg{Key:"enter"});
+    if (a.popup != "load" || a.popupAnimating) t.Fatal("Switching from a picker to filename entry must not animate");
+    a.Update(tui.KeyMsg{Key:"esc"});
+    if (a.popup != "picker" || a.popupAnimating) t.Fatal("Returning to the file picker must not animate");
+    a.popup = ""; a.overwrite = true; a.saveDestination = "save"; a.dialogChoice = 1;
+    a.game = newGame(0); a.active = true;
+    a.Update(tui.KeyMsg{Key:"enter"});
+    if (a.popup != "save" || a.popupAnimating) t.Fatal("Overwrite to Save as must keep one popup lifetime");
+    a.Update(tui.KeyMsg{Key:"esc"});
+    if (a.popup != "" || !a.overwrite || a.popupAnimating) t.Fatal("Cancelling Save as back to overwrite must not animate");
+}
+func TestPopupResizeAndDeferredQuit(t *testing.T) {
+    a := App{width:80,height:24,menu:true};
+    a.Update(tui.KeyMsg{Key:"rune",Text:"t"});
+    revision := a.popupRevision;
+    a.Update(tui.WindowSizeMsg{Width:60,Height:20});
+    if (a.popupAnimating || !a.popupPresent() || a.popupRevision == revision) t.Fatal("Resize must safely finish and invalidate old animation frames");
+    a.Update(popupFrameMsg{revision});
+    if (a.popupAnimating) t.Fatal("Resize must not allow an old timer to restart animation");
+    b := App{game:newGame(0),active:true,width:80,height:24,overwrite:true,saveDestination:"quit",dialogChoice:2};
+    ignored, command := b.Update(tui.KeyMsg{Key:"enter"});
+    if (command == tui.Quit || !b.quitAfterPopup || !b.popupClosing) t.Fatal("Normal popup exit must wait for its closing animation");
+    last := finishPopupFrames(&b);
+    if (last != tui.Quit || b.quitAfterPopup) t.Fatal("The last closing frame must perform the pending quit");
+}
+func TestPopupZoomGeometryAndUnicodeClipping(t *testing.T) {
+    oldWidth := 0; oldHeight := 0;
+    for (step := 0; step <= 8; step++) {
+        width,height,left,top := popupGeometry(54,18,step,80,24);
+        if (width < oldWidth || height < oldHeight || left < 0 || top < 0 || left+width > 79 || top+height > 24) t.Fatal("Zoom geometry must grow within the viewport");
+        if (step == 0 && (width != 1 || height != 1)) t.Fatal("Zoom must start from a point");
+        if (step == 8 && (width != 54 || height != 18 || left != 12 || top != 3)) t.Fatal("Zoom must end at the normal centered geometry");
+        oldWidth = width; oldHeight = height;
+    }
+    clipped := styledSlice("\x1b[31ma界⚑b",2,5);
+    plain := popupBackground(clipped);
+    if (len(plain) != 1 || plain[0] != " ⚑b") t.Fatal("Animated clipping must preserve Unicode and space-fill partial wide glyphs");
+    a := App{width:80,height:24,popup:"load"};
+    picture := a.popupPicture();
+    for (step := 0; step <= 8; step++) {
+        lines := popupBackground(a.popupOverlay("· ⚑ 界",picture,step));
+        if (len(lines) != 24) t.Fatal("Every animation frame must retain the viewport height");
+        for (_, line := range lines) if (textCells(line) != 79) t.Fatal("Every animation frame must retain its column width");
+    }
+}

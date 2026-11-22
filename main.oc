@@ -18,6 +18,7 @@ struct App {
     savePath, pendingPath string;
     popup, filename, popupError string;
     entryChoice int;
+    filenameCursor, themeCursor int;
     files []string;
     fileChoice, fileOffset int;
     settings bool;
@@ -26,6 +27,9 @@ struct App {
     themeFilter string;
     themeMatches []int;
     themeChoice, themeOffset int;
+    popupAnimating, popupClosing, quitAfterPopup bool;
+    popupProgress, popupRevision int;
+    popupImage PopupPicture;
 }
 func (a *App) setNotice(text string) {
     a.notice = displaySafe(text);
@@ -126,10 +130,10 @@ func (a *App) click(button string, x int, y int) bool {
     if (y == 3) {
         if (x >= 2 && x < 10) return a.requestSave("menu");
         if (x >= 11 && x < 19) return a.requestSave("save");
-        if (x >= 20 && x < 34) a.flagMode = !a.flagMode;
-        if (x >= 35 && x < 48) return a.requestSave("quit");
-        if (button == "left" && x >= 49 && x < 58) a.reset();
-        if (button == "left" && x >= 59 && x < 62) a.openThemes();
+        if (x >= 20 && x < 33) a.flagMode = !a.flagMode;
+        if (x >= 34 && x < 47) return a.requestSave("quit");
+        if (button == "left" && x >= 48 && x < 57) a.reset();
+        if (button == "left" && x >= 58 && x < 68) a.openThemes();
         return false;
     }
     if (y == 4) {
@@ -160,13 +164,13 @@ func (a *App) scroll() {
     if (a.offsetX > a.game.width-a.columns()) a.offsetX = a.game.width-a.columns();
     if (a.offsetY > a.game.height-a.rows()) a.offsetY = a.game.height-a.rows();
 }
-func (a *App) Update(message tui.Msg) (tui.Model, tui.Cmd) {
+func (a *App) handleMessage(message tui.Msg) (tui.Model, tui.Cmd) {
     previousNotice := a.noticeRevision;
     switch (e := message.(type)) {
         case clearNoticeMsg:
             if (e.revision == a.noticeRevision) a.setNotice("");
         case pulse:
-            if (!a.overwrite && a.popup == "" && !a.menu && a.active && a.game.seeded && !a.game.lost && !a.game.won) a.game.seconds++;
+            if (!a.popupAnimating && !a.overwrite && a.popup == "" && !a.menu && a.active && a.game.seeded && !a.game.lost && !a.game.won) a.game.seconds++;
             return a, tui.Tick(time.Second, pulse{});
         case tui.WindowSizeMsg: a.width = e.Width; a.height = e.Height;
         case tui.EOFMsg: return a, tui.Quit;
@@ -244,7 +248,7 @@ func (a *App) View() string {
         text += "  "+a.notice+"\n  1 / 2 / 3: quick start    q: quit";
         return a.themedView(text);
     }
-    text := title+themePanel()+"  [ Menu ] [ Save ] [ Flag: "+(a.flagMode ? "ON " : "OFF")+" ] [ Save+Quit ] [ Reset ] [t]\x1b[0m\n";
+    text := title+themePanel()+"  [ Menu ] [ Save ] [ Flag: "+(a.flagMode ? "ON " : "OFF")+" ] [ Save+Quit ] [ Reset ] [ Themes ]\x1b[0m\n";
     stats := "  Mines: "+io.Sprint(a.game.mines-a.game.flags())+"   Time: "+io.Sprint(a.game.seconds)+"s";
     stats = padded(stats,24);
     stats += "[Save as]";

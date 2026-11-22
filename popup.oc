@@ -98,11 +98,11 @@ func (a *App) dialogContent(row int) string {
     if (a.popup != "") {
         if (row == 1) return a.popup == "save" ? " Save as..." : " Resume from filename";
         if (row == 2) return " Filename (relative or absolute path):";
-        if (row == 4) return " ["+padded(clipText(a.filename,width-6,true)+"_",width-5)+"] ";
+        if (row == 4) return " ["+entryView(a.filename,a.filenameCursor,width-5)+"] ";
         if (row == 5) return " "+a.popupError;
         if (row == 7) return (a.entryChoice == 1 ? " >" : "  ")+(a.popup == "save" ? "[ Save ]" : "[ Open ]")+(a.entryChoice == 2 ? "  >" : "   ")+"[ Cancel ]";
         if (row == 9) return " Enter: submit  Tab: focus  Esc: cancel";
-        if (row == 10) return " Backspace: erase  Ctrl+U: clear";
+        if (row == 10) return " Left/Right/Home/End: move  Del: erase";
         return "";
     }
     if (row == 1) return " Overwrite saved game?";
@@ -113,38 +113,26 @@ func (a *App) dialogContent(row int) string {
     if (row == 10) return " Arrows / Enter / Esc, or click an option";
     return "";
 }
-// Dim the underlying screen and compose each dialog row inside a fixed border.
-func (a *App) dialogView(base string) string {
+// Complete, styled popup rows are shared by the steady view and closing zoom.
+func (a *App) popupPicture() PopupPicture {
+    width := a.dialogWidth(); height := a.dialogHeight();
+    if (width < 2) width = 2;
+    horizontal := "";
+    for (i := 0; i < width-2; i++) horizontal += "─";
+    border := themeBorder();
     lines := []string{};
-    line := []i8{};
-    for (i := 0; i < len(base); i++) {
-        if (base[i] == 27) {
-            for (; i < len(base) && base[i] != 109; i++) {}
-        } else if (base[i] == 10) { lines.append(line -> string); line = {}; }
-        else line.append(base[i]);
+    for (row := 0; row < height; row++) {
+        selected := a.popup == "picker" ? row >= 4 && row < 4+a.pickerRows() && row-4+a.fileOffset == a.fileChoice : (a.popup != "" ? (row == 4 && a.entryChoice == 0) || row == 7 : row == 5+a.dialogChoice);
+        if (a.popup == "themes") selected = row == 3 || (row >= 6 && row < 6+a.themeRows() && row-6+a.themeOffset == a.themeChoice && len(a.themeMatches) > 0);
+        style := selected ? themeFocus() : themeDialog();
+        box := border+"│"+style+padded(a.dialogContent(row),width-2)+border+"│";
+        if (row == 0) box = border+"╭"+horizontal+"╮";
+        if (row == height-1) box = border+"╰"+horizontal+"╯";
+        lines.append(box);
     }
-    lines.append(line -> string);
-    boxWidth := a.dialogWidth();
-    if (boxWidth < 8) return "";
-    left := a.dialogLeft(); top := a.dialogTop();
-    border := "+";
-    for (i := 0; i < boxWidth-2; i++) border += "-";
-    border += "+";
-    result := "";
-    for (y := 0; y < a.height; y++) {
-        background := padded(y < len(lines) ? lines[y] : "",a.width-1);
-        row := y-top;
-        if (row >= 0 && row < a.dialogHeight()) {
-            box := row == 0 || row == a.dialogHeight()-1 ? border : "|"+padded(a.dialogContent(row),boxWidth-2)+"|";
-            selected := a.popup == "picker" ? row >= 4 && row < 4+a.pickerRows() && row-4+a.fileOffset == a.fileChoice : (a.popup != "" ? (row == 4 && a.entryChoice == 0) || row == 7 : row == 5+a.dialogChoice);
-            if (a.popup == "themes") selected = row == 3 || (row >= 6 && row < 6+a.themeRows() && row-6+a.themeOffset == a.themeChoice && len(a.themeMatches) > 0);
-            style := selected ? themeFocus() : themeDialog();
-            result += themeMuted()+sliceCells(background,0,left)+"\x1b[0m"+style+box+"\x1b[0m"+themeMuted()+sliceCells(background,left+boxWidth,a.width-1)+"\x1b[0m";
-        } else result += themeMuted()+background+"\x1b[0m";
-        if (y+1 < a.height) result += "\n";
-    }
-    return result;
+    return PopupPicture{lines:lines,width:width,height:height,border:border};
 }
+func (a *App) dialogView(base string) string { return a.popupOverlay(base,a.popupPicture(),8); }
 
 // Slice unstyled UTF-8 by terminal columns. If a wide glyph crosses the popup
 // edge, fill only its exposed cells with spaces rather than splitting its bytes.

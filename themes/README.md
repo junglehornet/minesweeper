@@ -10,7 +10,7 @@ All colors are optional and inherit Ocean Dark when omitted. Duplicate or unknow
 | --- | --- |
 | `background` | Screen and game toolbar background |
 | `foreground` | Normal text and toolbar labels |
-| `muted` | Secondary text and status information |
+| `muted` | Secondary text, status information, and popup borders |
 | `accent` | Titles |
 | `text` | Text in dialogs and focused menu entries |
 | `surface` | Dialog background |

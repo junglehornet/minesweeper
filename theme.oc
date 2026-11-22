@@ -13,6 +13,7 @@ func themeTitle() string { return surface(themeColor("accent"),themeColor("backg
 func themePanel() string { return surface(themeColor("foreground"),themeColor("background"),false); }
 func themeFocus() string { return surface(themeColor("text"),themeColor("selection"),true); }
 func themeDialog() string { return surface(themeColor("text"),themeColor("surface"),false); }
+func themeBorder() string { return surface(themeColor("muted"),themeColor("surface"),false); }
 func themeDanger() string { return surface(themeColor("danger"),themeColor("background"),true); }
 
 func tileAppearance(g *Game, index int) (string, string) {
@@ -53,7 +54,10 @@ func ioNumber(value int) string {
 }
 
 func (a *App) themedView(text string) string {
-    if (a.overwrite || a.popup != "") text = a.dialogView(text);
+    if (a.popupPresent()) {
+        picture := a.popupPicture();
+        text = a.popupOverlay(text,picture,a.popupAnimating ? a.popupProgress : 8);
+    } else if (a.popupAnimating && a.popupClosing) text = a.popupOverlay(text,a.popupImage,a.popupProgress);
     return themeFrame(text,a.width,a.height);
 }
 // Paint the full viewport, restoring the base surface after each styled span.

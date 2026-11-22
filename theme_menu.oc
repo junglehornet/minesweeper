@@ -18,7 +18,7 @@ func (a *App) filterThemes() {
     for (i, theme := range a.themes) if (containsText(lowerText(theme.name),query) || containsText(lowerText(theme.id),query)) a.themeMatches.append(i);
 }
 func (a *App) openThemes() {
-    a.popup = "themes"; a.themeFilter = "";
+    a.popup = "themes"; a.themeFilter = ""; a.themeCursor = 0;
     themes, issue := loadThemes(configDirectory());
     a.themes = themes; a.popupError = issue;
     a.filterThemes();
@@ -47,14 +47,7 @@ func (a *App) themeKey(e tui.KeyMsg) {
     } else if (e.Key == "shift+tab" || e.Key == "up") {
         if (count > 0) a.themeChoice = (a.themeChoice+count-1)%count;
     } else if (e.Key == "enter") a.chooseTheme();
-    else if (e.Key == "ctrl+u") { a.themeFilter = ""; a.filterThemes(); }
-    else if (e.Key == "backspace" && len(a.themeFilter) > 0) {
-        end := len(a.themeFilter)-1;
-        for (end > 0 && ((a.themeFilter[end] -> u8) & 192) == 128) end--;
-        a.themeFilter = a.themeFilter[:end]; a.filterThemes();
-    } else if ((e.Key == "rune" || e.Key == "space") && len(a.themeFilter)+len(e.Text) <= 256) {
-        a.themeFilter += e.Text; a.filterThemes();
-    }
+    else if (editEntry(&a.themeFilter,&a.themeCursor,e,256)) a.filterThemes();
     a.scrollThemes();
 }
 func (a *App) themeMouse(e tui.MouseMsg) {
@@ -66,6 +59,10 @@ func (a *App) themeMouse(e tui.MouseMsg) {
     if (e.Action != "press" || e.Button != "left") return;
     x := e.X-a.dialogLeft(); row := e.Y-a.dialogTop();
     if (x <= 0 || x >= a.dialogWidth()-1) return;
+    if (row == 3) {
+        a.themeCursor = entryClick(a.themeFilter,a.themeCursor,a.dialogWidth()-13,x-10);
+        return;
+    }
     if (row == a.dialogHeight()-2) { a.popup = ""; return; }
     index := a.themeOffset+row-6;
     if (row >= 6 && row < 6+a.themeRows() && index >= 0 && index < len(a.themeMatches)) { a.themeChoice = index; a.chooseTheme(); }
@@ -73,7 +70,7 @@ func (a *App) themeMouse(e tui.MouseMsg) {
 func (a *App) themeContent(row int) string {
     width := a.dialogWidth()-2;
     if (row == 1) return " Themes";
-    if (row == 3) return " Filter ["+padded(clipText(a.themeFilter,width-12,true)+"_",width-11)+"]";
+    if (row == 3) return " Filter ["+entryView(a.themeFilter,a.themeCursor,width-11)+"]";
     if (row == 4) return " "+(a.popupError == "" ? "Tab / Shift+Tab: select   Enter: apply" : a.popupError);
     if (row == 6 && len(a.themeMatches) == 0) return " No matching themes.";
     if (row >= 6 && row < 6+a.themeRows()) {

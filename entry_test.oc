@@ -1,0 +1,76 @@
+package main;
+
+import "testing";
+import "term/tui";
+
+func TestEntryMiddleEditing(t *testing.T) {
+    text := "abcd"; cursor := len(text);
+    if (editEntry(&text,&cursor,tui.KeyMsg{Key:"left"},20)) t.Fatal("Moving must not report a text edit");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"left"},20);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"rune",Text:"X"},20);
+    if (text != "abXcd" || cursor != 3) t.Fatal("Typing must insert at the caret");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"backspace"},20);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"delete"},20);
+    if (text != "abd" || cursor != 2) t.Fatal("Backspace and Delete must erase opposite sides of the caret");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"home"},20);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"rune",Text:"^"},20);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"end"},20);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"rune",Text:"Z"},20);
+    if (text != "^abdZ" || cursor != 5) t.Fatal("Home and End must reach the entry boundaries");
+}
+func TestEntryUnicodeEditingAndLimits(t *testing.T) {
+    text := "a界é🙂z"; cursor := len(text);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"left"},100);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"left"},100);
+    if (cursor != 6) t.Fatal("Left must skip an entire UTF-8 scalar");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"delete"},100);
+    if (text != "a界éz") t.Fatal("Delete must erase an entire UTF-8 scalar");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"left"},100);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"backspace"},100);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"rune",Text:"⚑"},100);
+    if (text != "a⚑éz" || cursor != 4) t.Fatal("Middle editing must keep UTF-8 intact");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"right"},100);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"delete"},100);
+    if (text != "a⚑é") t.Fatal("Right must skip an entire UTF-8 scalar");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"ctrl+u"},100);
+    if (text != "" || cursor != 0) t.Fatal("Ctrl+U must clear the entry and reset the caret");
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"rune",Text:"界"},2);
+    editEntry(&text,&cursor,tui.KeyMsg{Key:"rune",Text:"\x1b[31m"},100);
+    if (text != "") t.Fatal("Entry limits and control-character filtering must remain enforced");
+    if (entryPosition("界",2) != 0) t.Fatal("Invalid byte offsets must be clamped to a scalar boundary");
+}
+func TestEntryViewportAndMouse(t *testing.T) {
+    text := "abcdefghijklmnopqrstuvwxyz界🙂";
+    for (cursor := 0; cursor <= len(text);) {
+        for (width := 1; width < 24; width++) {
+            view, start, inset := entryLayout(text,cursor,width);
+            if (textCells(view) != width || !containsText(view,"_")) t.Fatal("Every viewport must fit the box and keep the caret visible");
+            if (width > 2) {
+                caretColumn := textCells(text[:cursor])-start+inset;
+                if (entryClick(text,cursor,width,caretColumn) != cursor) t.Fatal("Mouse positioning must match the scrolled caret");
+            }
+        }
+        if (cursor == len(text)) break;
+        cursor += glyphSize(text,cursor);
+    }
+    if (entryClick("ab界cd",8,20,2) != 2 || entryClick("ab界cd",8,20,3) != 5) t.Fatal("Mouse clicks must respect wide glyphs");
+    if (entryClick("abc",3,20,15) != 3) t.Fatal("Clicking after the text must select its end");
+}
+func TestEntryControlsInPopups(t *testing.T) {
+    a := App{game:newGame(0),active:true,width:80,height:24};
+    a.openFilename("save","save");
+    a.popupKey(tui.KeyMsg{Key:"home"});
+    a.popupKey(tui.KeyMsg{Key:"rune",Text:"new-"});
+    if (a.filename != "new-minesweeper.save" || a.filenameCursor != 4) t.Fatal("Filename fields must edit at their caret");
+    a.popupMouse(tui.MouseMsg{X:a.dialogLeft()+3,Y:a.dialogTop()+4,Button:"left",Action:"press"});
+    a.popupKey(tui.KeyMsg{Key:"delete"});
+    if (a.filename != "ew-minesweeper.save" || a.filenameCursor != 0) t.Fatal("Clicking the filename must position the caret");
+    a.popup = "themes"; a.themes = []Theme{Theme{id:"ocean-dark",name:"Ocean Dark"},Theme{id:"ocean-light",name:"Ocean Light"}};
+    a.themeFilter = "ocean"; a.themeCursor = len(a.themeFilter); a.filterThemes();
+    a.themeKey(tui.KeyMsg{Key:"tab"});
+    a.themeKey(tui.KeyMsg{Key:"left"});
+    if (a.themeChoice != 1 || a.themeCursor != 4 || a.themeFilter != "ocean") t.Fatal("Caret movement must preserve theme selection");
+    a.themeMouse(tui.MouseMsg{X:a.dialogLeft()+10,Y:a.dialogTop()+3,Button:"left",Action:"press"});
+    a.themeKey(tui.KeyMsg{Key:"rune",Text:"X"});
+    if (a.themeFilter != "Xocean" || a.themeCursor != 1 || len(a.themeMatches) != 0) t.Fatal("Theme filters must support mouse positioning and middle insertion");
+}
