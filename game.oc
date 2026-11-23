@@ -6,11 +6,16 @@ import "time";
 
 struct Game {
     width, height, mines, cursor, seconds int;
-    seeded, lost, won bool;
+    seeded, lost, won, solverLimitReached bool;
     cells []int; // -1 = mine, otherwise adjacent count
     visible []int; // 0 = hidden, 1 = revealed, 2 = flag
     random int;
     boardID string;
+}
+func (g *Game) difficulty() int {
+    if (g.width == 30) return 2;
+    if (g.width == 16) return 1;
+    return 0;
 }
 func newGame(level int) Game {
     g := Game{boardID:io.Sprint(time.Monotonic()),width:9, height:9, mines:10, random:time.Monotonic() % 2147483646 + 1};
@@ -28,20 +33,53 @@ func (g *Game) neighbors(index int) []int {
     }
     return result;
 }
-func (g *Game) seed(first int) {
+func (g *Game) populateBoard(first int) {
+    if (g.random <= 0) g.random = 1;
+    for (i := 0; i < len(g.cells); i++) g.cells[i] = 0;
+    firstX := first % g.width; firstY := first / g.width;
     placed := 0;
     for (placed < g.mines) {
         g.random = g.random * 48271 % 2147483647;
         i := g.random % len(g.cells);
-        dx := i%g.width-first%g.width; dy := i/g.width-first/g.width;
+        dx := i % g.width - firstX; dy := i / g.width - firstY;
         if (g.cells[i] == -1 || (dx >= -1 && dx <= 1 && dy >= -1 && dy <= 1)) continue;
         g.cells[i] = -1; placed++;
     }
-    for (i := 0; i < len(g.cells); i++) {
-        if (g.cells[i] == -1) continue;
-        for (_, n := range g.neighbors(i)) if (g.cells[n] == -1) g.cells[i]++;
+    for (y := 0; y < g.height; y++) {
+        for (x := 0; x < g.width; x++) {
+            i := y * g.width + x;
+            if (g.cells[i] == -1) continue;
+            count := 0;
+            for (dy := -1; dy <= 1; dy++) {
+                yy := y + dy;
+                if (yy < 0 || yy >= g.height) continue;
+                for (dx := -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    xx := x + dx;
+                    if (xx >= 0 && xx < g.width && g.cells[yy * g.width + xx] == -1) count++;
+                }
+            }
+            g.cells[i] = count;
+        }
     }
+}
+func (g *Game) seedWithLimit(first int, maxAttempts int) {
+    if (maxAttempts < 1) maxAttempts = 1;
+    g.solverLimitReached = false;
+    diff := g.difficulty();
+    solved := false;
+    for (attempt := 0; attempt < maxAttempts; attempt++) {
+        g.populateBoard(first);
+        if (solveBoard(g.width, g.height, g.mines, g.cells, first, diff)) {
+            solved = true;
+            break;
+        }
+    }
+    g.solverLimitReached = !solved;
     g.seeded = true;
+}
+func (g *Game) seed(first int) {
+    g.seedWithLimit(first, 100);
 }
 func (g *Game) reveal(index int) {
     if (g.lost || g.won || g.visible[index] == 2) return;

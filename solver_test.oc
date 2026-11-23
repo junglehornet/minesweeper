@@ -1,0 +1,395 @@
+package main;
+
+import "testing";
+import "term/tui";
+
+func buildBoardFromMines(width int, height int, mineIndices []int) []int {
+    cells := []int{};
+    for (i := 0; i < width * height; i++) cells.append(0);
+    for (_, m := range mineIndices) cells[m] = -1;
+    for (y := 0; y < height; y++) {
+        for (x := 0; x < width; x++) {
+            idx := y * width + x;
+            if (cells[idx] == -1) continue;
+            count := 0;
+            for (dy := -1; dy <= 1; dy++) {
+                yy := y + dy;
+                if (yy < 0 || yy >= height) continue;
+                for (dx := -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    xx := x + dx;
+                    if (xx >= 0 && xx < width && cells[yy * width + xx] == -1) count++;
+                }
+            }
+            cells[idx] = count;
+        }
+    }
+    return cells;
+}
+
+func TestSolverTier0SingleCell(t *testing.T) {
+    // 4x3 board with one mine at (3, 0) = index 3, starting at (0, 2) = index 8.
+    // Flood-fill reveals everything except (3,0), leaving (2,0)=1 with only (3,0) unknown.
+    cells := buildBoardFromMines(4, 3, []int{3});
+    if (!solveBoard(4, 3, 1, cells, 8, 0)) t.Fatal("Tier 0 must solve a single-number board");
+}
+
+func TestSolverTier1OverlapRequired(t *testing.T) {
+    // 3x3 board with mines at (2,0)=2 and (2,2)=8, first click at (0,1)=3 (which is 0).
+    // Actually: let's build a classic 1-2-1 pattern on a 5x3 board:
+    // Row 0: 0 0 0 0 0
+    // Row 1: 1 2 1 0 0  (Wait: mines at (0,2)=10 and (2,2)=12)
+    // Let's trace 5x3 with mines at (0,2)=10 and (2,2)=12, first click at (0,0)=0:
+    // Row 0: 0 0 0 0 0
+    // Row 1: 1 2 1 1 0
+    // Row 2: * 2 * 1 0
+    // Clicking (0,0) flood-fills row 0 and (4,1),(4,2), revealing (0,1)=1, (1,1)=2, (2,1)=1, (3,1)=1, (3,2)=1.
+    // Wait: (3,1)=1 has only (2,2) unknown, so Tier 0 would solve (2,2)!
+    // To force 1-2-1 without an easy edge, use a 3x3 board with mines at (0,2)=6 and (2,2)=8, first click at (1,0)=1:
+    // Row 0: 0 0 0
+    // Row 1: 1 2 1
+    // Row 2: * 2 *
+    // Clicking (1,0)=1 flood-fills Row 0 and Row 1!
+    // Unknown cells: (0,2), (1,2), (2,2).
+    // (0,1)=1 sees {(0,2),(1,2)} (rem 1, u 2) -> Tier 0 stuck!
+    // (1,1)=2 sees {(0,2),(1,2),(2,2)} (rem 2, u 3) -> Tier 0 stuck!
+    // (2,1)=1 sees {(1,2),(2,2)} (rem 1, u 2) -> Tier 0 stuck!
+    // Tier 1 compares (1,1)=2 and (0,1)=1: A_only={(2,2)}, remA-remB=1=|A_only| -> (2,2) is a MINE!
+    // Then Tier 0 finishes: (2,1)=1 reveals (1,2), and (0,1)=1 flags (0,2).
+    cells := buildBoardFromMines(3, 3, []int{6, 8});
+    if (solveBoard(3, 3, 2, cells, 1, 0)) t.Fatal("Tier 0 must not solve a 1-2-1 pattern requiring overlap reasoning");
+    if (!solveBoard(3, 3, 2, cells, 1, 1)) t.Fatal("Tier 1 must solve a 1-2-1 pattern using overlapping cells");
+    if (!solveBoard(3, 3, 2, cells, 1, 2)) t.Fatal("Tier 2 must also solve a 1-2-1 pattern");
+}
+
+func TestSolverTier2GlobalMineCountInterior(t *testing.T) {
+    // 5x3 board with 1 mine at (2,0)=2, and wait — we want an interior unknown cell
+    // whose safety can only be deduced by knowing total mine count = 1.
+    // Construct a 5x3 board:
+    // Mines at (2,0)=2, (2,1)=7, (2,2)=12 (a solid wall of 3 mines at x=2), plus NO mines on the right!
+    // Wait: if x=2 is a solid wall of 3 mines, then x=3,4 are completely cut off from x=0,1!
+    // First click at (0,0)=0:
+    // Row 0: 0 2 * 2 0
+    // Row 1: 0 3 * 3 0
+    // Row 2: 0 2 * 2 0
+    // Clicking (0,0) flood-fills x=0 and x=1:
+    // (1,0)=2 sees {(2,0),(2,1)} -> Tier 0 flags both!
+    // (1,1)=3 sees {(2,0),(2,1),(2,2)} -> Tier 0 flags (2,2)!
+    // Now ALL 3 mines are flagged, and x=3,4 (6 cells) are still hidden with NO adjacent revealed numbers!
+    // Tier 0 and Tier 1 do NOT use total mine count, so they get stuck.
+    // Tier 2 sees remMines == 0, reveals all remaining interior cells, and solves the board!
+    cells := buildBoardFromMines(5, 3, []int{2, 7, 12});
+    if (solveBoard(5, 3, 3, cells, 0, 0)) t.Fatal("Tier 0 must not use global mine count");
+    if (solveBoard(5, 3, 3, cells, 0, 1)) t.Fatal("Tier 1 must not use global mine count");
+    if (!solveBoard(5, 3, 3, cells, 0, 2)) t.Fatal("Tier 2 must solve isolated interior cells using total mine count");
+}
+
+func TestSolverTier2DistantConstraintsAndTotalMines(t *testing.T) {
+    // Construct a 7x3 board where two distant frontier components interact via the total mine count:
+    // Mines at (0,2)=14, (6,2)=20 -> wait, let's make sure Component A has fixed 1 mine,
+    // and Component B has a cell only deducible when combined with Component A + total mines = 2!
+    // Consider a 6x4 board with 2 mines at (0,2)=12 and (5,3)=23? No, let's check:
+    // Place mines at:
+    // - (0,2)=12 (in left component: (0,1)=1 sees {(0,2),(1,2)}? No, we want left component to have 1 mine in 2 cells,
+    //   right component to be forced to 1 mine instead of 2).
+    // Actually, even simpler!
+    // 5x3 board with 2 mines:
+    // Row 0: 0 0 0 0 0
+    // Row 1: 1 1 0 1 1
+    // Row 2: * 1 0 1 *  -- wait, (2,2) is 0 so it reveals (1,2) and (3,2).
+    // Instead, 6x3 board with 2 mines at (0,2)=12 and (4,2)=16, wait:
+    // Let's make a 5x4 board where:
+    // - Left side has a 1-mine pair: (0,2) or (0,3) (say mine at (0,2)=10, wait if (1,2) is revealed it distinguishes them).
+    // Better: 6x3 board with 2 mines at (0,2)=12 and (5,2)=17:
+    // Wait: if there's an interior cell (3,2) untouched by any number, and total mines = 2,
+    // Left component {(0,2),(1,2)} has equation x0 + x1 = 1 (from (0,1)=1 and (1,1)=1 — wait (1,1) also touches (2,2)).
+    // Let's make an exact 7x3 board with 3 mines at (0,2)=14, (2,1)=9, (2,2)=16, wait:
+    // Simpler:
+    // 6x4 board:
+    // Row 0: 0 0 0 0 0 0
+    // Row 1: 1 1 0 0 1 1
+    // Row 2: * 1 0 0 1 *  (wait: (2,2) and (3,2) are 0, so they reveal row 2 and row 3!)
+    // To keep row 3 hidden as interior cells: put a full wall or use 3x1?
+    // Wait: what about a 5x4 board with mines at (0,2)=10, (1,2)=11, (2,2)=12, (3,2)=13, (4,2)=14 -> no, that's a wall.
+    // What about a 5x4 board with 4 mines:
+    // Row 0: 0 0 0 0 0
+    // Row 1: 1 2 2 2 1  <- mines at (1,2)=11, (2,2)=12? No, 1 2 2 2 1 has mines at (0,2)? No:
+    // Mines at (0,2)=10, (2,2)=12, (4,2)=14:
+    // Row 0: 0 0 0 0 0
+    // Row 1: 1 2 1 2 1  (wait: (1,1) sees (0,2) and (2,2) = 2; (2,1) sees (2,2) = 1; (3,1) sees (2,2) and (4,2) = 2)
+    // Clicking (0,0) reveals Row 0 and Row 1!
+    // Now Row 2 is {(0,2),(1,2),(2,2),(3,2),(4,2)} (frontier), and Row 3 is {(0,3)..(4,3)} (5 interior cells!).
+    // From Row 1 alone:
+    // (0,1)=1: x0 + x1 = 1
+    // (1,1)=2: x0 + x1 + x2 = 2  => x2 = 1 (Tier 1 finds x2 = 1!)
+    // Then (2,1)=1: x1 + x2 + x3 = 1 => x1 = 0, x3 = 0 (Tier 0 finds x1, x3 safe!)
+    // That solves Row 2 via Tier 1, then Row 3 is revealed.
+    //
+    // What about a 4x4 board where Row 2 has 2 mines at (0,2)=8 and (3,2)=11, and total mines = 2!
+    // Row 0: 0 0 0 0
+    // Row 1: 1 1 1 1
+    // Row 2: * 1 1 *
+    // Row 3: 1 1 1 1
+    // Trace clicking (0,0)=0!
+    // Row 0 and Row 1 are revealed: (0,1)=1, (1,1)=1, (2,1)=1, (3,1)=1!
+    // Frontier variables: x0=(0,2), x1=(1,2), x2=(2,2), x3=(3,2).
+    // Interior variables: Row 3 = (0,3),(1,3),(2,3),(3,3) (4 interior cells!).
+    // Equations on Row 2:
+    //   (0,1)=1: x0 + x1 = 1
+    //   (1,1)=1: x0 + x1 + x2 = 1   => Tier 1 deduces x2 = 0!
+    // Wait, Tier 1 solves x2=0, which reveals (2,2)=1, etc.
+    //
+    // Now change it so Tier 0 & Tier 1 are completely stuck, while Tier 2 solves via total mine count + frontier!
+    // 4x4 board with 2 mines at (0,2)=8 and (2,2)=10? No:
+    // 3x4 board with 2 mines at (0,2)=6 and (2,2)=8? That's 1-2-1.
+    // 4x4 board with 1 mine at (1,2)=9?
+    //   Row 0: 0 0 0 0
+    //   Row 1: 1 1 1 0 -> (3,1)=0 reveals Row 2/3.
+    // 3x4 board with 1 mine at (1,2)=7!
+    //   Row 0: 0 0 0
+    //   Row 1: 1 1 1
+    //   Row 2: 1 * 1
+    //   Row 3: 1 1 1
+    // TRACE THIS! Clicking (0,0)=0 reveals Row 0 and Row 1: (0,1)=1, (1,1)=1, (2,1)=1!
+    // Frontier: x0=(0,2), x1=(1,2), x2=(2,2).
+    //   (0,1)=1: x0 + x1 = 1
+    //   (1,1)=1: x0 + x1 + x2 = 1 -> Tier 1 deduces x2 = 0!
+    //
+    // What about 2x4 board with 1 mine at (0,2)=4?
+    //   Row 0: 0 0
+    //   Row 1: 1 1
+    //   Row 2: * 1
+    //   Row 3: 1 1
+    // TRACE THIS! Clicking (0,0)=0 reveals Row 0 and Row 1: (0,1)=1, (1,1)=1.
+    // Frontier: x0=(0,2), x1=(1,2). Both equations are x0 + x1 = 1!
+    // Interior: (0,3), (1,3).
+    // Total mines = 1!
+    // Tier 0: stuck (x0+x1=1).
+    // Tier 1: stuck (both equations are identical: x0+x1=1).
+    // Tier 2: Frontier component MUST contain exactly 1 mine, and remMines == 1 -> ALL interior cells (0,3) and (1,3) are SAFE!
+    // Revealing (0,3)=1 and (1,3)=1 still leaves x0+x1=1 symmetric, wait!
+    // Put a 2nd mine at (0,3)? No, then it's not interior safe.
+    // Make (0,3) and (1,3) asymmetric by making it 3x4 with mines at (0,2)=6? No, (2,1) would be 0.
+    // Make it a 3x4 board with mines at (0,2)=6 and (2,3)=11? Wait:
+    //   Row 0: 0 0 0
+    //   Row 1: 1 1 0 -> opens right side.
+    // What about a 4x5 board with 2 mines at (0,2)=8 and (2,2)=10? No.
+    // Let's make a 2x4 board with 1 mine at (0,2)=4 — wait, in 2x4, (0,3)=1 and (1,3)=1 are symmetric,
+    // EXCEPT if we add column 2 as a 3rd column where (2,2) is a known mine? No, even easier:
+    // 3x4 board with 2 mines at (0,2)=6 and (2,2)=8? No, 1-2-1.
+    // 3x4 board with 3 mines: (0,2)=6, (1,2)=7?
+    // WAIT: 2x5 board with 1 mine at (0,3)=6? No, Row 2 would be 0.
+    // Think: we just need ONE interior cell whose number breaks the symmetry of the frontier!
+    // Consider a 3x4 board with 2 mines at (0,2)=6 and (1,3)=10? No, (2,1)=0.
+    // Consider a 4x4 board with 2 mines at (0,2)=8 and (3,2)=11? No, (1,1)=1,(2,1)=1.
+    // Consider a 5x4 board with 2 mines at (0,2)=10 and (3,2)=13?
+    // Wait: why did (0,3) and (1,3) have the same number in 2x4? Because BOTH touched BOTH (0,2) and (1,2)!
+    // Make Row 3 have 3 cells: (0,3), (1,3), (2,3) and frontier have 2 cells: (0,2), (1,2) plus a wall?
+    // Even simpler: 3x5 board with 2 mines at (0,2)=6 and (2,2)=8?
+    // Look at a 3x4 board with mines at (0,2)=6, (2,2)=8, wait we already know:
+    // Two DISCONNECTED components!
+    // Component A (top-left): (0,2) or (1,2) has 1 mine.
+    // Component B (bottom-right): (4,3) or (5,3) has 1 mine.
+    // Total mines = 2.
+    // Interior cell (2,3) touches (1,2) and (3,2)... if (2,3) is revealed as SAFE by global mine count (2 - 1 - 1 = 0 interior mines!),
+    // then (2,3)'s number tells us whether (1,2) is a mine, which solves Component A!
+    // Let's verify a 6x4 board with 2 mines at (0,2)=12 and (5,2)=17!
+    // Wait: if mines are at (0,2) and (5,2):
+    // Row 0: 0 0 0 0 0 0
+    // Row 1: 1 1 0 0 1 1
+    // Row 2: * 1 0 0 1 *  -> (2,1)=0 reveals (2,2)=0, (1,2)=1, etc.
+    // To prevent (2,2) from being 0, put a mine at (2,2)!
+    // Actually: 3x5 board with mines at (0,2)=6, (1,2)=7? No.
+    // Let's test a 5x4 board with mines at (0,2)=10, (1,2)=11? No, let's check:
+    // Board: 5x5 with mines at (0,2)=10, (2,2)=12, (4,2)=14 -> no, Tier 1 solves 1-2-1.
+    // Board: 4x4 with mines at (0,2)=8, (1,2)=9, (2,2)=10, (3,2)=11 -> all flagged by Tier 0.
+    // Board: 3x3? No, let's construct a clean 2-component + total-mine-count board:
+    // 5x5 board with mines at: (0,3)=15, (2,3)=17?
+    // Wait: we can test `stepGlobalCSP()` directly on a constructed `Solver` state OR on a full `solveBoard`!
+    // Let's construct a full `solveBoard` 5x3 board where Tier 1 fails and Tier 2 succeeds!
+    // Look at a 5x4 board with mines at: (0,2)=10, (1,2)=11, (3,2)=13, (4,2)=14:
+    // Row 0: 0 0 0 0 0
+    // Row 1: 2 2 2 2 2
+    // Row 2: * * 2 * *
+    // Row 3: 2 2 2 2 2
+    // TRACE THIS! Clicking (0,0)=0 reveals Row 0 and Row 1: `2 2 2 2 2`!
+    // Frontier: x0=(0,2), x1=(1,2), x2=(2,2), x3=(3,2), x4=(4,2).
+    // Equations:
+    //   e0: x0 + x1 = 2  -> Tier 0 flags x0, x1! (Oops, 2 in 2 cells is Tier 0.)
+    //
+    // What about `1 2 2 2 1`?
+    // Mines at (1,2)=11, (2,2)=12, (3,2)=13 (3 mines):
+    // Row 0: 0 0 0 0 0
+    // Row 1: 1 2 3 2 1 -> (2,1)=3 flags all 3 (Tier 0).
+    //
+    // What about 6x4 with mines at (1,2)=13, (4,2)=16 (2 mines)?
+    // Row 0: 0 0 0 0 0 0
+    // Row 1: 1 1 1 1 1 1
+    // Row 2: 1 * 1 1 * 1
+    // Row 3: 1 1 1 1 1 1
+    // TRACE THIS! Clicking (0,0)=0 reveals Row 0 and Row 1: `1 1 1 1 1 1`!
+    // Frontier: x0..x5 (Row 2). Interior: Row 3 (6 cells). Total mines = 2!
+    // Equations:
+    //   e0: x0 + x1 = 1
+    //   e1: x0 + x1 + x2 = 1   -> Tier 1 deduces x2 = 0! (Oops, Tier 1!)
+    //
+    // Aha! To beat Tier 1 (pairwise overlap) AND require multi-equation / global reasoning:
+    // Take 5x4 with mines at (0,2)=10 and (3,2)=13?
+    //   Row 1: 1 1 1 1 1
+    //   e0: x0+x1=1, e1: x0+x1+x2=1 -> Tier 1 gets x2=0.
+    // What prevents Tier 1 from getting anything on a 1D row?
+    // Having NO equation be a subset of another (so don't have edge `x0+x1=1` next to `x0+x1+x2=1`!).
+    // Instead, make `e0: x0+x1=1`, `e1: x0+x1+x2=2`? No, that gives `x2=1`.
+    // In a 1D strip, edge equation has 2 vars and neighbor has 3 vars (subset!), so Tier 1 always reduces unless
+    // the edge is blocked or we use a 2D corner / 3-equation system!
+    // Look at a 5x5 board with a 3-equation system where NO pair of equations can deduce anything,
+    // OR our `Solver` state test for distant components + total mines!
+    // Let's test BOTH:
+    // 1. A 4x4 board with mines at (0,2)=8, (1,3)=13, (2,2)=10? Let's test a direct Solver state with 2 distant components!
+    // Board: 6x3, mines at (0,0)=0 and (5,0)=5 (total 2 mines).
+    // Revealed: (0,1)=1, (1,1)=1, (4,1)=1, (5,1)=1, and (1,2)=0? No, just set up `Solver` directly!
+    // Component 1: {(0,0), (1,0)} with equation (0,1)=1 => x0 + x1 = 1 (exactly 1 mine).
+    // Component 2: {(4,0), (5,0)} with equation (5,1)=1 => x4 + x5 = 1 (exactly 1 mine).
+    // Interior cell: (2,0) (touches NO revealed cell!).
+    // Total mines = 2.
+    // Tier 0 & Tier 1 cannot deduce (2,0) is safe.
+    // Tier 2 combines Component 1 (1 mine) + Component 2 (1 mine) + total mines (2) => (2,0) MUST be safe!
+    cells := buildBoardFromMines(6, 3, []int{0, 5});
+    s := newSolver(6, 3, 2, cells);
+    // Manually reveal only (0,1)=1, (1,1)=1, (4,1)=1, (5,1)=1, (0,2)=0? No, just the four '1's and (3,2)=0?
+    // Wait: (1,1) touches (2,0)! So use 7x3 with mines at (0,0)=0 and (6,0)=6:
+    // (0,1)=1 touches {(0,0),(1,0)} (plus (0,2),(1,2) which we mark revealed!).
+    // (6,1)=1 touches {(5,0),(6,0)} (plus (5,2),(6,2) which we mark revealed!).
+    // Interior unknown cell: (3,0) (touches neither (0,1) nor (6,1)).
+    cells7 := buildBoardFromMines(7, 3, []int{0, 6});
+    s7 := newSolver(7, 3, 2, cells7);
+    // Reveal row 2 completely and (0,1), (6,1), (2,0), (4,0), (2,1), (3,1), (4,1)? Wait: (3,1)=0 would touch (3,0).
+    // Just reveal (0,1)=1, (6,1)=1, and all of row 2 (14..20), plus (1,1)=1? No, (1,1) touches (2,0).
+    // If we reveal (0,1), (6,1), and row 2 (14..20), and (2,1),(4,1):
+    // Unknown cells: (0,0),(1,0) [Comp 1: sum=1], (5,0),(6,0) [Comp 2: sum=1], and (3,0) [interior!], plus (2,0),(4,0) [interior!].
+    // Wait: (0,1)=1 has unknown neighbors {(0,0),(1,0)} => sum = 1!
+    // (6,1)=1 has unknown neighbors {(5,0),(6,0)} => sum = 1!
+    // (2,0), (3,0), (4,0) are interior unknowns!
+    // Total mines = 2!
+    s7.state[7] = 1; s7.revealed++;   // (0,1) = 1
+    s7.state[13] = 1; s7.revealed++;  // (6,1) = 1
+    for (x := 0; x < 7; x++) { s7.state[14 + x] = 1; s7.revealed++; } // row 2
+    s7.state[8] = 1; s7.revealed++;   // (1,1) = 1? Wait (1,1) touches (2,0) so keep (1,1) hidden or wait:
+    // Actually if (1,1) is hidden, (0,1) touches (1,1)! So reveal (1,1)? If (1,1) is revealed, it's 1 and touches (0,0),(1,0),(2,0).
+    // Even simpler: put (1,1) as revealed in a 7x3 board where (1,1)=1, (5,1)=1, and (2,0),(4,0) are revealed!
+    s7.state[2] = 1; s7.revealed++;   // (2,0) = 0 (already safe)
+    s7.state[4] = 1; s7.revealed++;   // (4,0) = 0
+    s7.state[9] = 1; s7.revealed++;   // (2,1) = 0
+    s7.state[11] = 1; s7.revealed++;  // (4,1) = 0
+    s7.state[12] = 1; s7.revealed++;  // (5,1) = 1
+    // Now unknown cells are:
+    //   Comp 1: {(0,0), (1,0)} with (0,1)=1 and (1,1)=1 -> sum = 1.
+    //   Comp 2: {(5,0), (6,0)} with (5,1)=1 and (6,1)=1 -> sum = 1.
+    //   Interior: {(3,0), (3,1)} — wait (3,1) is adjacent to (2,1) which is 0, so (3,0) and (3,1) are interior!
+    // Total mines = 2.
+    if (s7.stepSingle()) t.Fatal("Tier 0 must not deduce anything in distant-component global test");
+    if (s7.stepOverlap()) t.Fatal("Tier 1 must not deduce anything in distant-component global test");
+    if (!s7.stepGlobalCSP()) t.Fatal("Tier 2 must deduce interior cells safe from distant components + total mines");
+    if (s7.state[3] != 1) t.Fatal("Tier 2 must reveal interior cell (3,0) as safe");
+}
+
+func TestSolverTier2DistantComponentConstrainsAnotherComponent(t *testing.T) {
+    // Two disconnected components where Component 1 forces Component 2's mine count via total mines!
+    // 7x2 board with 2 mines at (0,0)=0 and (5,0)=5:
+    //   Row 0: * 1 0 0 1 * 1   (indices 0..6)
+    //   Row 1: 1 1 0 0 1 1 1   (indices 7..13)
+    // Setup state:
+    //   Component 1: unknown {(0,0), (1,0)}, revealed (0,1)=1, (1,1)=1, (2,0)=0, (2,1)=0 -> x0 + x1 = 1 (exactly 1 mine).
+    //   Component 2: unknown {(4,0), (5,0), (6,0)}, revealed (4,1)=1, (5,1)=1, (6,1)=1, (3,0)=0, (3,1)=0.
+    //   Wait: in Component 2, (4,1)=1: x4+x5=1, (5,1)=1: x4+x5+x6=1 -> Tier 1 would solve x6=0!
+    // Instead, make Component 2 have ONLY ONE equation: (5,1)=1 => x4 + x5 + x6 = 1? No, that's always 1 mine.
+    // Make Component 2 have two possible mine counts {1, 2}:
+    //   (4,1)=1: x4 + x5 = 1
+    //   (6,1)=1: x5 + x6 = 1
+    //   Solutions for (x4, x5, x6):
+    //     (0, 1, 0) -> 1 mine (x5 = 1, x4 = 0, x6 = 0)
+    //     (1, 0, 1) -> 2 mines (x5 = 0, x4 = 1, x6 = 1)
+    //   Neither Tier 0, Tier 1, nor local Component 2 CSP can tell whether Component 2 has 1 or 2 mines!
+    //   Now add Component 1 (x0 + x1 = 1, always 1 mine) and total mines = 2!
+    //   Since Component 1 uses 1 mine and total mines = 2, Component 2 can ONLY have 1 mine!
+    //   Therefore x5 MUST be a mine, and x4, x6 MUST be safe!
+    cells := buildBoardFromMines(7, 2, []int{0, 5});
+    s := newSolver(7, 2, 2, cells);
+    // Reveal (0,1)=1, (1,1)=1, (2,0)=0, (2,1)=0, (3,0)=0, (3,1)=0, (4,1)=1, (6,1)=1.
+    // Leave (5,1) hidden? No, if (5,1) is hidden, (4,1) and (6,1) touch (5,1)!
+    // Put a 3rd row or just mark (5,1) as revealed=1? If (5,1)=1 is revealed, it says x4+x5+x6=1 which forces 1 mine locally.
+    // To avoid (5,1) being revealed while not touching (4,1)/(6,1), just use a 7x3 board where (5,1) is already a flagged mine?
+    // Even cleaner: 7x3 board with mines at (0,0)=0, (5,0)=5, (5,1)=12 (3 mines total):
+    //   Row 0: * 1 0 0 2 * 2
+    //   Row 1: 1 1 0 0 2 * 2
+    //   Row 2: 0 0 0 0 1 1 1
+    // Wait: if (5,1) is a flagged mine (state=2):
+    //   (4,1)=2 has 1 flagged mine -> rem=1 on {(4,0),(5,0)} (if row 2 is revealed)!
+    //   (6,1)=2 has 1 flagged mine -> rem=1 on {(5,0),(6,0)} (if row 2 is revealed)!
+    //   And (5,1) is flagged (not a revealed number), so there is NO equation at (5,1)!
+    //   Component 1: {(0,0),(1,0)} with (0,1)=1 -> 1 mine.
+    //   Component 2: {(4,0),(5,0),(6,0)} with (4,1)->rem 1 on {x4,x5} and (6,1)->rem 1 on {x5,x6} -> 1 or 2 mines!
+    //   Total mines = 3, 1 already flagged -> remMines = 2!
+    //   No interior cells!
+    //   Component 1 uses 1 mine => Component 2 MUST use 1 mine => (5,0) is a MINE, (4,0) and (6,0) are SAFE!
+    cells3 := buildBoardFromMines(7, 3, []int{0, 5, 12});
+    s3 := newSolver(7, 3, 3, cells3);
+    s3.flagCell(12); // (5,1) already flagged
+    // Reveal everything except (0,0)=0, (1,0)=1, (4,0)=4, (5,0)=5, (6,0)=6.
+    for (i := 0; i < 21; i++) {
+        if (i == 0 || i == 1 || i == 4 || i == 5 || i == 6 || i == 12) continue;
+        s3.state[i] = 1;
+        s3.revealed++;
+    }
+    if (s3.stepSingle()) t.Fatal("Tier 0 must not deduce anything in cross-component constraint test");
+    if (s3.stepOverlap()) t.Fatal("Tier 1 must not deduce anything in cross-component constraint test");
+    if (!s3.stepGlobalCSP()) t.Fatal("Tier 2 must deduce Component 2 using distant Component 1 + total mine count");
+    if (s3.state[5] != 2 || s3.state[4] != 1 || s3.state[6] != 1) t.Fatal("Tier 2 must flag (5,0) and reveal (4,0) and (6,0)");
+}
+
+func TestSolverRejectsUnsolvable5050(t *testing.T) {
+    // 4x2 board with 1 mine at (3,0)=3, first click at (0,0)=0:
+    // Completely symmetric between (3,0) and (3,1) -> unsolvable at every difficulty!
+    cells := buildBoardFromMines(4, 2, []int{3});
+    for (diff := 0; diff < 3; diff++) {
+        if (solveBoard(4, 2, 1, cells, 0, diff)) t.Fatalf("Unsolvable 50/50 board must fail at difficulty {}", diff);
+    }
+}
+
+func TestGeneratedBoardsAreSolvableAcrossDifficulties(t *testing.T) {
+    for (level := 0; level < 3; level++) {
+        for (trial := 0; trial < 3; trial++) {
+            g := newGame(level);
+            g.random = 12345 + level * 1000 + trial * 97;
+            first := (g.height / 2) * g.width + (g.width / 2);
+            g.reveal(first);
+            if (!g.seeded || g.lost) t.Fatal("First click must seed a safe board");
+            if (!g.solverLimitReached) {
+                if (!solveBoard(g.width, g.height, g.mines, g.cells, first, level)) {
+                    t.Fatalf("Generated board for difficulty {} must be solvable by that difficulty's solver", level);
+                }
+            }
+        }
+    }
+}
+
+func TestSolverIterationLimitWarningAndExpiry(t *testing.T) {
+    // A 4x2 board with 1 mine and first click at 0 is mathematically unsolvable for EVERY placement.
+    // So seed(0) will run all 100 attempts, keep the last generated board, and set solverLimitReached.
+    g := Game{width: 4, height: 2, mines: 1, random: 42};
+    for (i := 0; i < 8; i++) { g.cells.append(0); g.visible.append(0); }
+    a := App{game: g, active: true, width: 80, height: 24};
+    ignored, cmd := a.Update(tui.KeyMsg{Key: "enter"});
+    if (!a.game.seeded) t.Fatal("Board must still be seeded after reaching iteration limit");
+    if (a.notice != "Warning: solver reached iteration limit.") {
+        t.Fatalf("Expected iteration limit warning, got: {}", a.notice);
+    }
+    if (cmd == tui.NoCmd) t.Fatal("Iteration limit warning must schedule a 2-second expiry timer");
+    // Verify the mine count on the fallback board is valid.
+    mines := 0;
+    for (_, c := range a.game.cells) if (c == -1) mines++;
+    if (mines != 1) t.Fatal("Fallback board after iteration limit must still be a valid board");
+    // Verify the scheduled clearNoticeMsg clears the warning.
+    a.Update(clearNoticeMsg{a.noticeRevision});
+    if (a.notice != "") t.Fatal("Iteration limit warning must disappear when its timer fires");
+}

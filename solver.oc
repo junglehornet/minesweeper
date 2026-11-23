@@ -1,0 +1,727 @@
+package main;
+
+struct Solver {
+    width, height, mines, total int;
+    cells []int;
+    state []int; // 0 = unknown, 1 = revealed, 2 = flagged
+    nbrs []int;
+    nbrCount []int;
+    revealed, flagged int;
+}
+
+struct CSPComponent {
+    cells []int;       // global cell index for each component-local variable 0..V-1
+    eqVars []int;      // flattened variable indices for each equation
+    eqStart []int;     // start offset in eqVars for equation e
+    eqLen []int;       // number of variables in equation e
+    eqRem []int;       // remaining mines required in equation e
+    varEqs []int;      // flattened equation indices for each variable
+    varEqStart []int;  // start offset in varEqs for variable v
+    varEqLen []int;    // number of equations containing variable v
+    maxM int;
+    aborted bool;
+    countFeasible []bool;
+    hasZero []bool;    // [m * V + v]
+    hasOne []bool;     // [m * V + v]
+}
+
+struct ComponentSearch {
+    comp *CSPComponent;
+    vCount, eCount, maxM int;
+    assign []int;        // -1 = unassigned, 0 = safe, 1 = mine
+    eqUnassigned []int;
+    eqRem []int;
+    trail []int;
+    currentMines int;
+    nodes, maxNodes int;
+    aborted bool;
+}
+
+func absInt(x int) int { return x < 0 ? -x : x; }
+
+func gcdInt(a int, b int) int {
+    x := absInt(a); y := absInt(b);
+    for (y != 0) {
+        t := x % y;
+        x = y;
+        y = t;
+    }
+    return x == 0 ? 1 : x;
+}
+
+func newSolver(width int, height int, mines int, cells []int) Solver {
+    total := width * height;
+    s := Solver{width: width, height: height, mines: mines, total: total, cells: cells};
+    for (i := 0; i < total; i++) {
+        s.state.append(0);
+        s.nbrCount.append(0);
+    }
+    for (i := 0; i < total * 8; i++) s.nbrs.append(0);
+    for (y := 0; y < height; y++) {
+        for (x := 0; x < width; x++) {
+            idx := y * width + x;
+            base := idx * 8;
+            count := 0;
+            for (dy := -1; dy <= 1; dy++) {
+                yy := y + dy;
+                if (yy < 0 || yy >= height) continue;
+                for (dx := -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    xx := x + dx;
+                    if (xx < 0 || xx >= width) continue;
+                    s.nbrs[base + count] = yy * width + xx;
+                    count++;
+                }
+            }
+            s.nbrCount[idx] = count;
+        }
+    }
+    return s;
+}
+
+func (s *Solver) isSolved() bool {
+    return s.revealed == s.total - s.mines;
+}
+
+func (s *Solver) revealCell(index int) {
+    if (s.state[index] != 0) return;
+    s.state[index] = 1;
+    s.revealed++;
+    if (s.cells[index] != 0) return;
+    queue := []int{index};
+    for (head := 0; head < len(queue); head++) {
+        i := queue[head];
+        base := i * 8;
+        count := s.nbrCount[i];
+        for (k := 0; k < count; k++) {
+            n := s.nbrs[base + k];
+            if (s.state[n] == 0) {
+                s.state[n] = 1;
+                s.revealed++;
+                if (s.cells[n] == 0) queue.append(n);
+            }
+        }
+    }
+}
+
+func (s *Solver) flagCell(index int) {
+    if (s.state[index] != 0) return;
+    s.state[index] = 2;
+    s.flagged++;
+}
+
+// Tier 0: Single-cell reasoning (only counts unknown and flagged neighbors of one revealed cell).
+func (s *Solver) stepSingle() bool {
+    changed := false;
+    for (i := 0; i < s.total; i++) {
+        if (s.state[i] != 1 || s.cells[i] <= 0) continue;
+        base := i * 8;
+        count := s.nbrCount[i];
+        unknown := 0; flags := 0;
+        for (k := 0; k < count; k++) {
+            st := s.state[s.nbrs[base + k]];
+            if (st == 0) unknown++;
+            else if (st == 2) flags++;
+        }
+        if (unknown == 0) continue;
+        rem := s.cells[i] - flags;
+        if (rem == 0) {
+            for (k := 0; k < count; k++) {
+                n := s.nbrs[base + k];
+                if (s.state[n] == 0) { s.revealCell(n); changed = true; }
+            }
+        } else if (rem == unknown) {
+            for (k := 0; k < count; k++) {
+                n := s.nbrs[base + k];
+                if (s.state[n] == 0) { s.flagCell(n); changed = true; }
+            }
+        }
+    }
+    return changed;
+}
+
+// Tier 1: Pairwise overlapping-number reasoning between nearby revealed cells.
+func (s *Solver) stepOverlap() bool {
+    for (a := 0; a < s.total; a++) {
+        if (s.state[a] != 1 || s.cells[a] <= 0) continue;
+        baseA := a * 8;
+        cntA := s.nbrCount[a];
+        uA: [8]int;
+        lenA := 0; flagsA := 0;
+        for (k := 0; k < cntA; k++) {
+            n := s.nbrs[baseA + k];
+            st := s.state[n];
+            if (st == 0) { uA[lenA] = n; lenA++; }
+            else if (st == 2) flagsA++;
+        }
+        if (lenA == 0) continue;
+        remA := s.cells[a] - flagsA;
+        ax := a % s.width; ay := a / s.width;
+
+        for (dy := -2; dy <= 2; dy++) {
+            by := ay + dy;
+            if (by < 0 || by >= s.height) continue;
+            for (dx := -2; dx <= 2; dx++) {
+                bx := ax + dx;
+                if (bx < 0 || bx >= s.width) continue;
+                b := by * s.width + bx;
+                if (b <= a || s.state[b] != 1 || s.cells[b] <= 0) continue;
+
+                baseB := b * 8;
+                cntB := s.nbrCount[b];
+                uB: [8]int;
+                lenB := 0; flagsB := 0;
+                for (k := 0; k < cntB; k++) {
+                    n := s.nbrs[baseB + k];
+                    st := s.state[n];
+                    if (st == 0) { uB[lenB] = n; lenB++; }
+                    else if (st == 2) flagsB++;
+                }
+                if (lenB == 0) continue;
+                remB := s.cells[b] - flagsB;
+
+                aOnly: [8]int; lenAOnly := 0;
+                shared := 0;
+                for (ia := 0; ia < lenA; ia++) {
+                    found := false;
+                    for (ib := 0; ib < lenB; ib++) {
+                        if (uA[ia] == uB[ib]) { found = true; break; }
+                    }
+                    if (found) shared++;
+                    else { aOnly[lenAOnly] = uA[ia]; lenAOnly++; }
+                }
+                if (shared == 0) continue;
+
+                bOnly: [8]int; lenBOnly := 0;
+                for (ib := 0; ib < lenB; ib++) {
+                    found := false;
+                    for (ia := 0; ia < lenA; ia++) {
+                        if (uB[ib] == uA[ia]) { found = true; break; }
+                    }
+                    if (!found) { bOnly[lenBOnly] = uB[ib]; lenBOnly++; }
+                }
+                if (lenAOnly == 0 && lenBOnly == 0) continue;
+
+                if (remA - remB == lenAOnly) {
+                    for (k := 0; k < lenAOnly; k++) s.flagCell(aOnly[k]);
+                    for (k := 0; k < lenBOnly; k++) s.revealCell(bOnly[k]);
+                    return true;
+                }
+                if (remB - remA == lenBOnly) {
+                    for (k := 0; k < lenBOnly; k++) s.flagCell(bOnly[k]);
+                    for (k := 0; k < lenAOnly; k++) s.revealCell(aOnly[k]);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Exact integer RREF over a component's linear equations for fast multi-equation deductions.
+func (s *Solver) rrefDeduce(comp *CSPComponent) bool {
+    vCount := len(comp.cells);
+    eCount := len(comp.eqRem);
+    if (vCount == 0 || eCount == 0) return false;
+    cols := vCount + 1;
+    mat := []int{};
+    for (i := 0; i < eCount * cols; i++) mat.append(0);
+    for (e := 0; e < eCount; e++) {
+        start := comp.eqStart[e];
+        length := comp.eqLen[e];
+        for (k := 0; k < length; k++) mat[e * cols + comp.eqVars[start + k]] = 1;
+        mat[e * cols + vCount] = comp.eqRem[e];
+    }
+
+    pivotRow := 0;
+    for (col := 0; col < vCount && pivotRow < eCount; col++) {
+        found := -1;
+        for (r := pivotRow; r < eCount; r++) {
+            if (mat[r * cols + col] != 0) { found = r; break; }
+        }
+        if (found == -1) continue;
+        if (found != pivotRow) {
+            for (c := 0; c < cols; c++) {
+                tmp := mat[pivotRow * cols + c];
+                mat[pivotRow * cols + c] = mat[found * cols + c];
+                mat[found * cols + c] = tmp;
+            }
+        }
+        piv := mat[pivotRow * cols + col];
+        if (piv < 0) {
+            for (c := 0; c < cols; c++) mat[pivotRow * cols + c] = -mat[pivotRow * cols + c];
+            piv = -piv;
+        }
+        for (r := 0; r < eCount; r++) {
+            if (r == pivotRow) continue;
+            val := mat[r * cols + col];
+            if (val == 0) continue;
+            g := gcdInt(piv, val);
+            mulR := piv / g;
+            mulP := val / g;
+            overflow := false;
+            for (c := 0; c < cols; c++) {
+                nextVal := mat[r * cols + c] * mulR - mat[pivotRow * cols + c] * mulP;
+                if (absInt(nextVal) > 1000000000) { overflow = true; break; }
+            }
+            if (overflow) continue;
+            rowGcd := 0;
+            for (c := 0; c < cols; c++) {
+                nextVal := mat[r * cols + c] * mulR - mat[pivotRow * cols + c] * mulP;
+                mat[r * cols + c] = nextVal;
+                if (nextVal != 0) rowGcd = rowGcd == 0 ? absInt(nextVal) : gcdInt(rowGcd, nextVal);
+            }
+            if (rowGcd > 1) {
+                for (c := 0; c < cols; c++) mat[r * cols + c] /= rowGcd;
+            }
+        }
+        pivotRow++;
+    }
+
+    changed := false;
+    for (r := 0; r < eCount; r++) {
+        posSum := 0; negSum := 0;
+        for (c := 0; c < vCount; c++) {
+            val := mat[r * cols + c];
+            if (val > 0) posSum += val;
+            else if (val < 0) negSum += val;
+        }
+        if (posSum == 0 && negSum == 0) continue;
+        rhs := mat[r * cols + vCount];
+        if (rhs == posSum) {
+            for (c := 0; c < vCount; c++) {
+                val := mat[r * cols + c];
+                if (val > 0) { s.flagCell(comp.cells[c]); changed = true; }
+                else if (val < 0) { s.revealCell(comp.cells[c]); changed = true; }
+            }
+        } else if (rhs == negSum) {
+            for (c := 0; c < vCount; c++) {
+                val := mat[r * cols + c];
+                if (val > 0) { s.revealCell(comp.cells[c]); changed = true; }
+                else if (val < 0) { s.flagCell(comp.cells[c]); changed = true; }
+            }
+        }
+    }
+    return changed;
+}
+
+func (cs *ComponentSearch) undoTo(mark int) {
+    for (len(cs.trail) > mark) {
+        v := cs.trail.pop();
+        val := cs.assign[v];
+        cs.assign[v] = -1;
+        cs.currentMines -= val;
+        start := cs.comp.varEqStart[v];
+        length := cs.comp.varEqLen[v];
+        for (k := 0; k < length; k++) {
+            e := cs.comp.varEqs[start + k];
+            cs.eqUnassigned[e]++;
+            cs.eqRem[e] += val;
+        }
+    }
+}
+
+func (cs *ComponentSearch) assignAndPropagate(startVar int, startVal int) (bool, int) {
+    mark := len(cs.trail);
+    qVar := []int{startVar};
+    qVal := []int{startVal};
+    for (head := 0; head < len(qVar); head++) {
+        v := qVar[head];
+        val := qVal[head];
+        if (cs.assign[v] != -1) {
+            if (cs.assign[v] != val) { cs.undoTo(mark); return false, mark; }
+            continue;
+        }
+        cs.assign[v] = val;
+        cs.trail.append(v);
+        cs.currentMines += val;
+        if (cs.currentMines > cs.maxM) { cs.undoTo(mark); return false, mark; }
+
+        vStart := cs.comp.varEqStart[v];
+        vLen := cs.comp.varEqLen[v];
+        for (k := 0; k < vLen; k++) {
+            e := cs.comp.varEqs[vStart + k];
+            cs.eqUnassigned[e]--;
+            cs.eqRem[e] -= val;
+            rem := cs.eqRem[e];
+            unassigned := cs.eqUnassigned[e];
+            if (rem < 0 || rem > unassigned) { cs.undoTo(mark); return false, mark; }
+            if (unassigned > 0 && (rem == 0 || rem == unassigned)) {
+                forced := rem == 0 ? 0 : 1;
+                eStart := cs.comp.eqStart[e];
+                eLen := cs.comp.eqLen[e];
+                for (j := 0; j < eLen; j++) {
+                    nv := cs.comp.eqVars[eStart + j];
+                    if (cs.assign[nv] == -1) {
+                        qVar.append(nv);
+                        qVal.append(forced);
+                    }
+                }
+            }
+        }
+    }
+    return true, mark;
+}
+
+func (cs *ComponentSearch) backtrack() {
+    if (cs.aborted) return;
+    cs.nodes++;
+    if (cs.nodes > cs.maxNodes) { cs.aborted = true; return; }
+
+    // Choose next unassigned variable (preferring one in the tightest active equation).
+    nextVar := -1;
+    bestUnassigned := 999999;
+    for (v := 0; v < cs.vCount; v++) {
+        if (cs.assign[v] != -1) continue;
+        vStart := cs.comp.varEqStart[v];
+        vLen := cs.comp.varEqLen[v];
+        minU := 999999;
+        for (k := 0; k < vLen; k++) {
+            u := cs.eqUnassigned[cs.comp.varEqs[vStart + k]];
+            if (u < minU) minU = u;
+        }
+        if (minU < bestUnassigned) {
+            bestUnassigned = minU;
+            nextVar = v;
+            if (bestUnassigned <= 2) break;
+        }
+    }
+
+    if (nextVar == -1) {
+        m := cs.currentMines;
+        cs.comp.countFeasible[m] = true;
+        base := m * cs.vCount;
+        for (v := 0; v < cs.vCount; v++) {
+            if (cs.assign[v] == 0) cs.comp.hasZero[base + v] = true;
+            else cs.comp.hasOne[base + v] = true;
+        }
+        return;
+    }
+
+    for (val := 0; val <= 1; val++) {
+        ok, mark := cs.assignAndPropagate(nextVar, val);
+        if (ok) {
+            cs.backtrack();
+            cs.undoTo(mark);
+            if (cs.aborted) return;
+        }
+    }
+}
+
+func solveComponent(comp *CSPComponent, remMines int, maxNodes int) {
+    vCount := len(comp.cells);
+    eCount := len(comp.eqRem);
+    maxM := vCount < remMines ? vCount : remMines;
+    comp.maxM = maxM;
+    comp.aborted = false;
+    for (m := 0; m <= maxM; m++) comp.countFeasible.append(false);
+    for (i := 0; i < (maxM + 1) * vCount; i++) {
+        comp.hasZero.append(false);
+        comp.hasOne.append(false);
+    }
+
+    cs := ComponentSearch{comp: comp, vCount: vCount, eCount: eCount, maxM: maxM, maxNodes: maxNodes};
+    for (v := 0; v < vCount; v++) cs.assign.append(-1);
+    for (e := 0; e < eCount; e++) {
+        cs.eqUnassigned.append(comp.eqLen[e]);
+        cs.eqRem.append(comp.eqRem[e]);
+    }
+    cs.backtrack();
+    comp.aborted = cs.aborted;
+}
+
+// Tier 2: Multi-equation constraint solving + global reasoning with total mine count and distant constraints.
+func (s *Solver) stepGlobalCSP() bool {
+    remMines := s.mines - s.flagged;
+    unknownTotal := s.total - s.revealed - s.flagged;
+    if (unknownTotal <= 0) return false;
+    if (remMines == 0) {
+        for (i := 0; i < s.total; i++) if (s.state[i] == 0) s.revealCell(i);
+        return true;
+    }
+    if (remMines == unknownTotal) {
+        for (i := 0; i < s.total; i++) if (s.state[i] == 0) s.flagCell(i);
+        return true;
+    }
+
+    // Identify frontier unknown cells and active equations.
+    cellToFrontier := []int{};
+    for (i := 0; i < s.total; i++) cellToFrontier.append(-1);
+    frontierCells := []int{};
+    eqCell := []int{};
+    eqRemList := []int{};
+    eqStart := []int{};
+    eqLen := []int{};
+    eqVars := []int{};
+
+    for (i := 0; i < s.total; i++) {
+        if (s.state[i] != 1 || s.cells[i] <= 0) continue;
+        base := i * 8;
+        cnt := s.nbrCount[i];
+        flags := 0;
+        uList: [8]int;
+        uLen := 0;
+        for (k := 0; k < cnt; k++) {
+            n := s.nbrs[base + k];
+            st := s.state[n];
+            if (st == 0) { uList[uLen] = n; uLen++; }
+            else if (st == 2) flags++;
+        }
+        if (uLen == 0) continue;
+        eqCell.append(i);
+        eqRemList.append(s.cells[i] - flags);
+        eqStart.append(len(eqVars));
+        eqLen.append(uLen);
+        for (k := 0; k < uLen; k++) {
+            c := uList[k];
+            fid := cellToFrontier[c];
+            if (fid == -1) {
+                fid = len(frontierCells);
+                cellToFrontier[c] = fid;
+                frontierCells.append(c);
+            }
+            eqVars.append(fid);
+        }
+    }
+
+    fCount := len(frontierCells);
+    eTotal := len(eqRemList);
+    if (fCount == 0) return false;
+    interiorCount := unknownTotal - fCount;
+
+    // Build adjacency from frontier variable -> equations.
+    fEqCount := []int{};
+    for (i := 0; i < fCount; i++) fEqCount.append(0);
+    for (e := 0; e < eTotal; e++) {
+        st := eqStart[e]; ln := eqLen[e];
+        for (k := 0; k < ln; k++) fEqCount[eqVars[st + k]]++;
+    }
+    fEqStart := []int{};
+    fEqCursor := []int{};
+    totalLinks := 0;
+    for (i := 0; i < fCount; i++) {
+        fEqStart.append(totalLinks);
+        fEqCursor.append(totalLinks);
+        totalLinks += fEqCount[i];
+    }
+    fEqs := []int{};
+    for (i := 0; i < totalLinks; i++) fEqs.append(0);
+    for (e := 0; e < eTotal; e++) {
+        st := eqStart[e]; ln := eqLen[e];
+        for (k := 0; k < ln; k++) {
+            v := eqVars[st + k];
+            fEqs[fEqCursor[v]] = e;
+            fEqCursor[v]++;
+        }
+    }
+
+    // Partition frontier variables and equations into connected components.
+    varVisited := []bool{};
+    for (i := 0; i < fCount; i++) varVisited.append(false);
+    eqVisited := []bool{};
+    for (i := 0; i < eTotal; i++) eqVisited.append(false);
+    varLocal := []int{};
+    for (i := 0; i < fCount; i++) varLocal.append(-1);
+
+    comps := []CSPComponent{};
+    for (startV := 0; startV < fCount; startV++) {
+        if (varVisited[startV]) continue;
+        comp := CSPComponent{};
+        qVars := []int{startV};
+        varVisited[startV] = true;
+        varLocal[startV] = 0;
+        comp.cells.append(frontierCells[startV]);
+        compEqIds := []int{};
+
+        for (head := 0; head < len(qVars); head++) {
+            v := qVars[head];
+            st := fEqStart[v]; ln := fEqCount[v];
+            for (k := 0; k < ln; k++) {
+                e := fEqs[st + k];
+                if (eqVisited[e]) continue;
+                eqVisited[e] = true;
+                compEqIds.append(e);
+                est := eqStart[e]; eln := eqLen[e];
+                for (j := 0; j < eln; j++) {
+                    nv := eqVars[est + j];
+                    if (!varVisited[nv]) {
+                        varVisited[nv] = true;
+                        varLocal[nv] = len(comp.cells);
+                        comp.cells.append(frontierCells[nv]);
+                        qVars.append(nv);
+                    }
+                }
+            }
+        }
+
+        vCount := len(comp.cells);
+        for (i := 0; i < len(compEqIds); i++) {
+            e := compEqIds[i];
+            comp.eqRem.append(eqRemList[e]);
+            comp.eqStart.append(len(comp.eqVars));
+            est := eqStart[e]; eln := eqLen[e];
+            comp.eqLen.append(eln);
+            for (j := 0; j < eln; j++) comp.eqVars.append(varLocal[eqVars[est + j]]);
+        }
+        // Build local var -> eq adjacency for this component.
+        for (v := 0; v < vCount; v++) comp.varEqLen.append(0);
+        for (le := 0; le < len(comp.eqRem); le++) {
+            est := comp.eqStart[le]; eln := comp.eqLen[le];
+            for (j := 0; j < eln; j++) comp.varEqLen[comp.eqVars[est + j]]++;
+        }
+        localCursor := []int{};
+        lTotal := 0;
+        for (v := 0; v < vCount; v++) {
+            comp.varEqStart.append(lTotal);
+            localCursor.append(lTotal);
+            lTotal += comp.varEqLen[v];
+        }
+        for (i := 0; i < lTotal; i++) comp.varEqs.append(0);
+        for (le := 0; le < len(comp.eqRem); le++) {
+            est := comp.eqStart[le]; eln := comp.eqLen[le];
+            for (j := 0; j < eln; j++) {
+                lv := comp.eqVars[est + j];
+                comp.varEqs[localCursor[lv]] = le;
+                localCursor[lv]++;
+            }
+        }
+        comps.append(comp);
+    }
+
+    // Step A: Fast multi-equation linear deduction (RREF), then exact CSP enumeration per component.
+    for (k := 0; k < len(comps); k++) {
+        if (s.rrefDeduce(&comps[k])) return true;
+    }
+
+    changed := false;
+    for (k := 0; k < len(comps); k++) {
+        solveComponent(&comps[k], remMines, 20000);
+        if (comps[k].aborted) continue;
+        vCount := len(comps[k].cells);
+        maxM := comps[k].maxM;
+        for (v := 0; v < vCount; v++) {
+            everZero := false; everOne := false;
+            for (m := 0; m <= maxM; m++) {
+                if (!comps[k].countFeasible[m]) continue;
+                if (comps[k].hasZero[m * vCount + v]) everZero = true;
+                if (comps[k].hasOne[m * vCount + v]) everOne = true;
+            }
+            if (everZero && !everOne) { s.revealCell(comps[k].cells[v]); changed = true; }
+            else if (everOne && !everZero) { s.flagCell(comps[k].cells[v]); changed = true; }
+        }
+        if (changed) return true;
+    }
+
+    // Step B: Global reasoning combining all components with total mine count and interior cells.
+    kCount := len(comps);
+    stride := remMines + 1;
+    prefix := []bool{};
+    suffix := []bool{};
+    for (i := 0; i < (kCount + 1) * stride; i++) {
+        prefix.append(false);
+        suffix.append(false);
+    }
+    prefix[0] = true;
+    for (k := 0; k < kCount; k++) {
+        maxM := comps[k].maxM;
+        for (sum := 0; sum <= remMines; sum++) {
+            if (!prefix[k * stride + sum]) continue;
+            for (m := 0; m <= maxM && sum + m <= remMines; m++) {
+                if (comps[k].aborted || comps[k].countFeasible[m]) {
+                    prefix[(k + 1) * stride + sum + m] = true;
+                }
+            }
+        }
+    }
+    suffix[kCount * stride] = true;
+    for (k := kCount - 1; k >= 0; k--) {
+        maxM := comps[k].maxM;
+        for (sum := 0; sum <= remMines; sum++) {
+            if (!suffix[(k + 1) * stride + sum]) continue;
+            for (m := 0; m <= maxM && sum + m <= remMines; m++) {
+                if (comps[k].aborted || comps[k].countFeasible[m]) {
+                    suffix[k * stride + sum + m] = true;
+                }
+            }
+        }
+    }
+
+    // Deduce interior cells (unknown cells not touching any revealed number).
+    if (interiorCount > 0) {
+        minValidS := remMines + 1;
+        maxValidS := -1;
+        for (sum := 0; sum <= remMines; sum++) {
+            if (!prefix[kCount * stride + sum]) continue;
+            remInterior := remMines - sum;
+            if (remInterior >= 0 && remInterior <= interiorCount) {
+                if (sum < minValidS) minValidS = sum;
+                if (sum > maxValidS) maxValidS = sum;
+            }
+        }
+        if (minValidS <= maxValidS) {
+            if (minValidS == remMines) {
+                for (i := 0; i < s.total; i++) {
+                    if (s.state[i] == 0 && cellToFrontier[i] == -1) { s.revealCell(i); changed = true; }
+                }
+            } else if (maxValidS == remMines - interiorCount) {
+                for (i := 0; i < s.total; i++) {
+                    if (s.state[i] == 0 && cellToFrontier[i] == -1) { s.flagCell(i); changed = true; }
+                }
+            }
+        }
+    }
+
+    // Filter each exact component by globally compatible mine counts from distant components + total mines.
+    for (k := 0; k < kCount; k++) {
+        if (comps[k].aborted) continue;
+        otherFeasible := []bool{};
+        for (sum := 0; sum <= remMines; sum++) otherFeasible.append(false);
+        for (a := 0; a <= remMines; a++) {
+            if (!prefix[k * stride + a]) continue;
+            for (b := 0; a + b <= remMines; b++) {
+                if (suffix[(k + 1) * stride + b]) otherFeasible[a + b] = true;
+            }
+        }
+
+        vCount := len(comps[k].cells);
+        maxM := comps[k].maxM;
+        globallyValid := []bool{};
+        for (m := 0; m <= maxM; m++) {
+            valid := false;
+            if (comps[k].countFeasible[m]) {
+                for (other := 0; other <= remMines - m; other++) {
+                    if (otherFeasible[other] && remMines - m - other <= interiorCount) {
+                        valid = true;
+                        break;
+                    }
+                }
+            }
+            globallyValid.append(valid);
+        }
+
+        for (v := 0; v < vCount; v++) {
+            everZero := false; everOne := false;
+            for (m := 0; m <= maxM; m++) {
+                if (!globallyValid[m]) continue;
+                if (comps[k].hasZero[m * vCount + v]) everZero = true;
+                if (comps[k].hasOne[m * vCount + v]) everOne = true;
+            }
+            if (everZero && !everOne) { s.revealCell(comps[k].cells[v]); changed = true; }
+            else if (everOne && !everZero) { s.flagCell(comps[k].cells[v]); changed = true; }
+        }
+    }
+
+    return changed;
+}
+
+func solveBoard(width int, height int, mines int, cells []int, first int, difficulty int) bool {
+    s := newSolver(width, height, mines, cells);
+    s.revealCell(first);
+    for (!s.isSolved()) {
+        if (s.stepSingle()) continue;
+        if (difficulty >= 1 && s.stepOverlap()) continue;
+        if (difficulty >= 2 && s.stepGlobalCSP()) continue;
+        break;
+    }
+    return s.isSolved();
+}
